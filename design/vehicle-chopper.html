@@ -1,0 +1,64 @@
+<!-- @dsCard group="Vehicles" -->
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chopper</title>
+<style>
+  *{margin:0;box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:#eef3f6;color:#26303a;padding:22px;display:flex;justify-content:center}
+  .card{width:460px;background:#fff;border:1px solid #dde6ec;border-radius:20px;overflow:hidden;
+    box-shadow:0 10px 34px rgba(40,60,80,.10)}
+  .hd{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 12px}
+  .hd h1{font-size:20px;font-weight:800;letter-spacing:-.3px}
+  .tag{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;
+    color:#5d7184;background:#eef3f6;border:1px solid #dde6ec;padding:4px 10px;border-radius:999px}
+  .art{padding:6px 0 10px;background:linear-gradient(180deg,#f6fafc,#eef4f7)}
+  .art svg{display:block;margin:0 auto}
+  .meta{padding:14px 20px 4px;display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12.5px}
+  .meta .k{color:#7d8 d9b;opacity:.7;color:#7d8d9b}
+  .meta .v{font-weight:600;text-align:right}
+  .palette{display:flex;gap:0;padding:14px 20px 20px}
+  .sw{flex:1;height:46px;border-radius:0;position:relative}
+  .sw:first-child{border-radius:10px 0 0 10px}.sw:last-child{border-radius:0 10px 10px 0}
+  .sw span{position:absolute;bottom:4px;left:0;right:0;text-align:center;font-size:9px;
+    font-weight:700;color:rgba(255,255,255,.92);text-shadow:0 1px 2px rgba(0,0,0,.35)}
+  .note{padding:0 20px 18px;font-size:12px;line-height:1.55;color:#5d7184}
+</style></head>
+<body>
+  <div class="card">
+    <div class="hd"><h1>Chopper</h1><span class="tag">Raked / American</span></div>
+    <div class="art">
+<svg width="440" height="240" viewBox="0 0 440 240">
+  <ellipse cx="220" cy="206" rx="170" ry="11" fill="#000" opacity="0.08"/>
+  <!-- rear wheel (fat) -->
+  <circle cx="120" cy="172" r="36" fill="#191c20"/>
+    <circle cx="120" cy="172" r="21.599999999999998" fill="#cdd2d8"/>
+    <circle cx="120" cy="172" r="5.76" fill="#2a2d31"/>
+  <!-- front wheel (small, far ahead) -->
+  <circle cx="360" cy="178" r="28" fill="#191c20"/>
+    <circle cx="360" cy="178" r="16.8" fill="#cdd2d8"/>
+    <circle cx="360" cy="178" r="4.48" fill="#2a2d31"/>
+  <!-- raked fork -->
+  <path d="M196 96 L360 178" stroke="#cdd2d8" stroke-width="7" stroke-linecap="round"/>
+  <!-- frame -->
+  <path d="M120 172 L176 118 L210 120" stroke="#191b1f" stroke-width="9" fill="none" stroke-linecap="round"/>
+  <!-- engine -->
+  <rect x="150" y="138" width="40" height="38" rx="6" fill="#2c3036"/>
+  <!-- teardrop tank -->
+  <ellipse cx="196" cy="116" rx="40" ry="20" fill="#ca5a2e"/>
+  <ellipse cx="196" cy="110" rx="30" ry="10" fill="#e98a3c"/>
+  <!-- ape-hanger bars -->
+  <path d="M205 118 L214 84" stroke="#cdd2d8" stroke-width="5" stroke-linecap="round"/>
+  <path d="M214 84 L236 84" stroke="#cdd2d8" stroke-width="5" stroke-linecap="round"/>
+  <!-- seat + rider -->
+  <path d="M120 150 C118 138 150 136 156 142" stroke="#141518" stroke-width="9" fill="none" stroke-linecap="round"/>
+  <ellipse cx="150" cy="110" rx="16" ry="26" fill="#2b2e34"/>
+  <circle cx="150" cy="80" r="13" fill="#14151a"/>
+  <!-- pipes -->
+  <path d="M150 178 L86 184" stroke="#cdd2d8" stroke-width="6" stroke-linecap="round"/>
+</svg></div>
+    <div class="meta"><div class="k">Class</div><div class="v">Long-rake cruiser</div><div class="k">Front end</div><div class="v">Extended forks, small front wheel</div><div class="k">Engine</div><div class="v">Finned V-twin, staggered pipes</div><div class="k">Detail</div><div class="v">Teardrop tank w/ flame top, ape-hangers</div><div class="k">Top speed</div><div class="v">255 km/h</div></div>
+    <div class="palette"><div class="sw" style="background:#191b1f"><span>FRAME</span></div><div class="sw" style="background:#ca5a2e"><span>TANK</span></div><div class="sw" style="background:#e98a3c"><span>FLAME</span></div><div class="sw" style="background:#cdd2d8"><span>CHROME</span></div><div class="sw" style="background:#14151a"><span>RIDER</span></div></div>
+  </div>
+</body></html>

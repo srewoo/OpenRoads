@@ -1,0 +1,54 @@
+<!-- @dsCard group="Seasons & Landscape" -->
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sunny Summer</title>
+<style>
+  *{margin:0;box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:#eef3f6;color:#26303a;padding:22px;display:flex;justify-content:center}
+  .card{width:460px;background:#fff;border:1px solid #dde6ec;border-radius:20px;overflow:hidden;
+    box-shadow:0 10px 34px rgba(40,60,80,.10)}
+  .hd{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 12px}
+  .hd h1{font-size:20px;font-weight:800;letter-spacing:-.3px}
+  .tag{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;
+    color:#5d7184;background:#eef3f6;border:1px solid #dde6ec;padding:4px 10px;border-radius:999px}
+  .art{padding:6px 0 10px;background:linear-gradient(180deg,#f6fafc,#eef4f7)}
+  .art svg{display:block;margin:0 auto}
+  .meta{padding:14px 20px 4px;display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12.5px}
+  .meta .k{color:#7d8 d9b;opacity:.7;color:#7d8d9b}
+  .meta .v{font-weight:600;text-align:right}
+  .palette{display:flex;gap:0;padding:14px 20px 20px}
+  .sw{flex:1;height:46px;border-radius:0;position:relative}
+  .sw:first-child{border-radius:10px 0 0 10px}.sw:last-child{border-radius:0 10px 10px 0}
+  .sw span{position:absolute;bottom:4px;left:0;right:0;text-align:center;font-size:9px;
+    font-weight:700;color:rgba(255,255,255,.92);text-shadow:0 1px 2px rgba(0,0,0,.35)}
+  .note{padding:0 20px 18px;font-size:12px;line-height:1.55;color:#5d7184}
+</style></head>
+<body>
+  <div class="card">
+    <div class="hd"><h1>Sunny Summer</h1><span class="tag">cicadas</span></div>
+    <div class="art"><svg width="440" height="200" viewBox="0 0 440 200">
+    <defs><linearGradient id="sky_summer" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#bfe3f2"/><stop offset="1" stop-color="#cfe9f4"/></linearGradient></defs>
+    <rect x="0" y="0" width="440" height="120" fill="url(#sky_summer)"/>
+    <rect x="0" y="118" width="440" height="82" fill="#9ccb7a"/>
+    <!-- hills -->
+    <ellipse cx="110" cy="124" rx="90" ry="30" fill="#8bbd6a"/>
+    <ellipse cx="350" cy="122" rx="110" ry="34" fill="#8bbd6a"/>
+    <!-- road -->
+    <path d="M196 200 L244 200 L300 118 L162 118 Z" fill="#44474f"/>
+    <path d="M218 200 L222 200 L236 118 L228 118 Z" fill="#f2efe2" opacity="0.9"/>
+    <path d="M196 200 L300 118" stroke="#f2efe2" stroke-width="2"/>
+    <path d="M244 200 L162 118" stroke="#f2efe2" stroke-width="2"/>
+    <!-- a tree -->
+    <rect x="86" y="96" width="6" height="22" fill="#7a5a40"/>
+    <circle cx="89" cy="92" r="16" fill="#7cae5a"/>
+    <!-- accent sun/cloud -->
+    <circle cx="380" cy="40" r="16" fill="#e7d27a" opacity="0.85"/>
+    
+  </svg></div>
+    <div class="meta"><div class="k">Mood</div><div class="v">Soft, mild, low-contrast</div><div class="k">Weather</div><div class="v">Clear</div><div class="k">Road</div><div class="v">Dark asphalt, painted lane lines</div><div class="k">Ambience</div><div class="v">cicadas</div></div>
+    <div class="palette"><div class="sw" style="background:#bfe3f2"><span>SKY</span></div><div class="sw" style="background:#9ccb7a"><span>GROUND</span></div><div class="sw" style="background:#44474f"><span>ROAD</span></div><div class="sw" style="background:#7cae5a"><span>FOLIAGE</span></div><div class="sw" style="background:#e7d27a"><span>ACCENT</span></div></div>
+  </div>
+</body></html>

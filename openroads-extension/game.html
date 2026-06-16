@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+<title>Open Roads — 10 Missions</title>
+<style>
+  :root {
+    --ui-bg: rgba(28, 32, 40, 0.55);
+    --ui-border: rgba(255, 255, 255, 0.18);
+    --ink: #f4f6fb;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #cfe3f0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  #game { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  /* ---------- HUD ---------- */
+  #hud {
+    position: fixed; inset: 0; pointer-events: none; z-index: 10;
+  }
+  .panel {
+    position: absolute;
+    background: rgba(24, 28, 36, 0.42);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+    backdrop-filter: blur(9px) saturate(115%);
+    -webkit-backdrop-filter: blur(9px) saturate(115%);
+    padding: 9px 13px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.14);
+  }
+  #speedo { top: 18px; left: 18px; min-width: 0; padding: 7px 14px; }
+  #speedo .big { font-size: 26px; font-weight: 700; line-height: 1; letter-spacing: -0.5px; }
+  #speedo .unit { font-size: 11px; opacity: 0.65; margin-left: 3px; font-weight: 500; }
+  #speedo .label { display: none; }
+
+  #stats { top: 18px; right: 18px; text-align: right; min-width: 0; padding: 7px 13px; }
+  #stats .row { display: flex; justify-content: space-between; gap: 14px; font-size: 11px; margin: 1px 0; }
+  #stats .row span:first-child { opacity: 0.55; }
+  #stats .row span:last-child { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  #scene-tag {
+    bottom: 18px; left: 50%; transform: translateX(-50%);
+    font-size: 11.5px; letter-spacing: 0.5px; padding: 6px 14px;
+    display: flex; align-items: center; gap: 7px; opacity: 0.85;
+  }
+  #scene-tag .dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; box-shadow: 0 0 7px rgba(255,255,255,0.5); }
+
+  #help {
+    bottom: 18px; right: 18px; font-size: 10.5px; line-height: 1.6; opacity: 0.7;
+  }
+
+  #mode-pill {
+    bottom: 18px; left: 18px; font-size: 11px; letter-spacing: 0.5px; padding: 6px 13px;
+    display: flex; align-items: center; gap: 8px; opacity: 0.88;
+  }
+  #mode-pill #mode-name { font-weight: 600; }
+  #mode-pill #auto-tag {
+    font-size: 9px; font-weight: 700; letter-spacing: 1.5px; color: #16202e;
+    background: #aee0cc; border-radius: 5px; padding: 2px 6px; display: none;
+  }
+  #mode-pill.auto #auto-tag { display: inline-block; }
+
+  /* ---------- Missions (compact chip tracker) ---------- */
+  #missions {
+    top: 64px; left: 18px; width: 196px; padding: 9px 11px;
+  }
+  #missions .m-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 7px; }
+  #missions .m-title { font-size: 9.5px; text-transform: uppercase; letter-spacing: 1.5px; opacity: 0.5; }
+  #missions #m-count { font-size: 13px; font-weight: 700; color: #aee0cc; }
+  #m-list { list-style: none; display: flex; flex-direction: column; gap: 3px; }
+  #m-list li {
+    display: flex; align-items: center; gap: 7px; font-size: 10.5px; line-height: 1.2;
+    opacity: 0.7; transition: opacity 0.3s ease, color 0.3s ease;
+  }
+  #m-list li .box {
+    flex: 0 0 13px; width: 13px; height: 13px; border-radius: 4px;
+    border: 1.5px solid rgba(255,255,255,0.32); display: flex; align-items: center; justify-content: center;
+    font-size: 9px; transition: all 0.3s ease;
+  }
+  #m-list li.done { color: #aee0cc; opacity: 0.95; }
+  #m-list li.done .box { background: #aee0cc; border-color: #aee0cc; color: #16202e; }
+  #m-list li.done .txt { text-decoration: line-through; text-decoration-color: rgba(174,224,204,0.5); }
+  #m-list li.active-m .box { border-color: #aeccff; box-shadow: 0 0 0 2px rgba(174,200,255,0.18); }
+  #m-list li .prog { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 9.5px; opacity: 0.65; }
+
+  /* ---------- Toast ---------- */
+  #toast {
+    position: absolute; top: 90px; left: 50%; transform: translateX(-50%) translateY(-12px);
+    background: rgba(20,26,38,0.82); border: 1px solid rgba(174,224,204,0.4);
+    border-radius: 14px; padding: 12px 22px; font-size: 15px; font-weight: 600;
+    backdrop-filter: blur(8px); box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+    opacity: 0; transition: opacity 0.35s ease, transform 0.35s ease; text-align: center;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast .sub { font-size: 12px; font-weight: 500; opacity: 0.7; margin-top: 2px; }
+
+  /* ---------- Win screen ---------- */
+  #win-overlay {
+    position: fixed; inset: 0; z-index: 55; display: none;
+    align-items: center; justify-content: center;
+    background: radial-gradient(circle at 50% 30%, rgba(174,224,204,0.18), rgba(20,26,38,0.78));
+    backdrop-filter: blur(6px);
+  }
+  #win-overlay.show { display: flex; }
+  #win-overlay .menu h1 { font-size: 34px; }
+  #win-overlay .wstat { display: flex; justify-content: center; gap: 34px; margin: 18px 0 4px; }
+  #win-overlay .wstat .v { font-size: 30px; font-weight: 800; color: #aee0cc; }
+  #win-overlay .wstat .k { font-size: 11px; text-transform: uppercase; letter-spacing: 2px; opacity: 0.6; margin-top: 4px; }
+  #help kbd {
+    background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 5px; padding: 1px 7px; font-family: inherit; font-size: 11px; font-weight: 600;
+  }
+
+  /* ---------- Overlay / Menu ---------- */
+  #overlay {
+    position: fixed; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 50% 30%, rgba(255,255,255,0.12), rgba(20,26,38,0.7));
+    backdrop-filter: blur(4px);
+    transition: opacity 0.5s ease;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  .menu {
+    width: min(760px, 92vw);
+    background: var(--ui-bg);
+    border: 1px solid var(--ui-border);
+    border-radius: 24px;
+    padding: 34px 38px 30px;
+    backdrop-filter: blur(16px) saturate(120%);
+    -webkit-backdrop-filter: blur(16px) saturate(120%);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    text-align: center;
+  }
+  .menu h1 { font-size: 38px; font-weight: 800; letter-spacing: -1px; margin-bottom: 4px; }
+  .menu h1 .accent { background: linear-gradient(90deg,#9fd6c1,#a8c8ff); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  .menu .sub { font-size: 14px; opacity: 0.7; margin-bottom: 26px; }
+
+  .group-title { font-size: 12px; text-transform: uppercase; letter-spacing: 2px; opacity: 0.55; margin: 18px 0 10px; text-align: left; }
+  .choices { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .choice {
+    flex: 1 1 0; min-width: 120px;
+    pointer-events: auto; cursor: pointer;
+    background: rgba(255,255,255,0.06);
+    border: 1.5px solid rgba(255,255,255,0.14);
+    border-radius: 14px; padding: 14px 10px;
+    transition: all 0.18s ease;
+  }
+  .choice:hover { background: rgba(255,255,255,0.12); transform: translateY(-2px); }
+  .choice.active { border-color: #a8c8ff; background: rgba(168,200,255,0.16); box-shadow: 0 0 0 3px rgba(168,200,255,0.15); }
+  .choice.locked { opacity: 0.55; }
+  .choice .lock { font-size: 11px; font-weight: 600; margin-top: 4px; color: #ffd27a; }
+  #coin-bal { font-size: 13px; opacity: 0.85; margin-bottom: 20px; }
+  #coin-bal b { color: #ffd27a; }
+  .choice .icon { font-size: 30px; line-height: 1; }
+  .choice .name { font-size: 13px; font-weight: 600; margin-top: 8px; }
+  .choice .desc { font-size: 10.5px; opacity: 0.6; margin-top: 2px; }
+
+  .seasons .choice { min-width: 110px; }
+  .swatch { height: 10px; border-radius: 6px; margin-top: 9px; }
+
+  #settings-row { display: flex; flex-direction: column; gap: 12px; align-items: center; }
+  .set-vol { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .set-vol input[type=range] { width: 220px; accent-color: #aee0cc; }
+  .set-vol #vol-val { width: 28px; text-align: right; opacity: 0.7; font-variant-numeric: tabular-nums; }
+  #quality-choices { gap: 8px; }
+  #quality-choices .choice { min-width: 96px; padding: 8px 10px; }
+  .q-caption { font-size: 11px; line-height: 1.5; opacity: 0.6; max-width: 360px; margin: 6px auto 0; text-align: center; }
+
+  #start-btn {
+    pointer-events: auto; cursor: pointer; margin-top: 30px;
+    font-size: 17px; font-weight: 700; letter-spacing: 0.5px;
+    color: #16202e; background: linear-gradient(90deg,#aee0cc,#aeccff);
+    border: none; border-radius: 14px; padding: 15px 50px;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    box-shadow: 0 8px 24px rgba(140,180,230,0.35);
+  }
+  #start-btn:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(140,180,230,0.45); }
+  #start-btn:active { transform: translateY(0); }
+
+  .footnote { font-size: 11px; opacity: 0.5; margin-top: 16px; }
+
+  /* paused pill */
+  #pause-pill {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    z-index: 40; font-size: 22px; font-weight: 700; letter-spacing: 2px;
+    padding: 18px 40px; display: none;
+  }
+  /* ---------- Pause button + menu ---------- */
+  #pause-btn {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%); z-index: 35;
+    pointer-events: auto; cursor: pointer; color: #f4f6fb; font-size: 12px; letter-spacing: 2px;
+    padding: 8px 14px; border-radius: 10px;
+  }
+  #pause-menu {
+    position: fixed; inset: 0; z-index: 45; display: none; align-items: center; justify-content: center;
+    background: rgba(16,22,32,0.55); backdrop-filter: blur(5px);
+  }
+  #pause-menu.show { display: flex; }
+  #pause-menu .menu { width: min(440px, 92vw); text-align: center; }
+  #pause-menu h1 { font-size: 28px; font-weight: 800; margin-bottom: 18px; }
+  #pause-menu .set-vol { justify-content: center; margin-bottom: 8px; }
+  #pause-menu #p-quality { justify-content: center; }
+  #pause-menu #p-quality .choice { min-width: 84px; padding: 8px 10px; }
+  .pause-actions { display: flex; gap: 12px; justify-content: center; margin-top: 22px; }
+  #resume-btn {
+    pointer-events: auto; cursor: pointer; font-size: 15px; font-weight: 700; color: #16202e;
+    background: linear-gradient(90deg,#aee0cc,#aeccff); border: none; border-radius: 12px; padding: 12px 30px;
+  }
+  #pmenu-btn {
+    pointer-events: auto; cursor: pointer; font-size: 14px; font-weight: 600; color: #f4f6fb;
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2); border-radius: 12px; padding: 12px 22px;
+  }
+
+  /* ---------- Touch controls ---------- */
+  #touch { position: fixed; inset: 0; z-index: 30; pointer-events: none; display: none; }
+  body.touch #touch { display: block; }
+  body.touch #help { display: none; }            /* keyboard hints irrelevant on touch */
+  .t-cluster { position: absolute; bottom: 26px; display: flex; gap: 14px; align-items: center; }
+  .t-left { left: 26px; }
+  .t-right { right: 26px; }
+  .tbtn {
+    pointer-events: auto; -webkit-user-select: none; user-select: none; touch-action: none;
+    width: 72px; height: 72px; border-radius: 50%;
+    background: rgba(24,28,36,0.5); border: 1.5px solid rgba(255,255,255,0.28); color: #f4f6fb;
+    font-size: 30px; line-height: 1; display: flex; align-items: center; justify-content: center;
+    backdrop-filter: blur(8px); box-shadow: 0 6px 18px rgba(0,0,0,0.2);
+  }
+  .tbtn:active { background: rgba(174,224,204,0.4); transform: scale(0.94); }
+  .tbtn-go { width: 86px; height: 86px; background: rgba(174,224,204,0.35); font-size: 30px; }
+
+  #loader {
+    position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
+    background: #cfe3f0; color: #2a3340; font-size: 15px; letter-spacing: 1px;
+  }
+  @media (max-width: 560px) {
+    #help { display: none; }
+    .menu h1 { font-size: 30px; }
+  }
+</style>
+</head>
+<body>
+  <div id="game"></div>
+
+  <div id="loader">Loading engine…</div>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div id="speedo" class="panel">
+      <div><span class="big" id="speed-val">0</span><span class="unit">km/h</span></div>
+      <div class="label">Speed</div>
+    </div>
+    <div id="stats" class="panel">
+      <div class="row"><span>Distance</span><span id="dist-val">0.0 km</span></div>
+      <div class="row"><span>Best</span><span id="best-val">0.0 km</span></div>
+      <div class="row"><span>Coins</span><span id="coin-val">0</span></div>
+      <div class="row"><span>Gear</span><span id="gear-val">D</span></div>
+    </div>
+    <div id="scene-tag" class="panel"><span class="dot" id="scene-dot"></span><span id="scene-name">Summer</span></div>
+
+    <!-- Mission tracker -->
+    <div id="missions" class="panel">
+      <div class="m-head"><span id="m-count">0 / 10</span><span class="m-title">Missions</span></div>
+      <ul id="m-list"></ul>
+    </div>
+
+    <!-- Objective toast -->
+    <div id="toast"></div>
+
+    <!-- mode / autodrive pill -->
+    <div id="mode-pill" class="panel"><span id="mode-name">Challenge</span><span id="auto-tag">AUTO</span></div>
+
+    <div id="help" class="panel">
+      <div><kbd>↑</kbd> accelerate &nbsp; <kbd>↓</kbd> reverse</div>
+      <div><kbd>←</kbd> <kbd>→</kbd> steer &nbsp; <kbd>Space</kbd> brake &nbsp; <kbd>Shift</kbd> drift</div>
+      <div><kbd>C</kbd> camera &nbsp; <kbd>F</kbd> autodrive &nbsp; <kbd>M</kbd> mute &nbsp; <kbd>P</kbd> pause</div>
+    </div>
+  </div>
+
+  <button id="pause-btn" class="panel">❚❚</button>
+
+  <!-- In-drive pause menu with settings -->
+  <div id="pause-menu">
+    <div class="menu">
+      <h1>Paused</h1>
+      <div class="set-vol"><span>Volume</span><input type="range" id="p-vol" min="0" max="100"><span id="p-vol-val">90</span></div>
+      <div class="group-title">Quality</div>
+      <div class="choices" id="p-quality"></div>
+      <div class="q-caption">Higher = sharper with more detail &amp; shadows; lower = smoother. Applies on your next run.</div>
+      <div class="pause-actions">
+        <button id="resume-btn">Resume →</button>
+        <button id="pmenu-btn">Main Menu</button>
+      </div>
+      <div class="footnote">Quality changes apply on your next run · Esc/P to resume</div>
+    </div>
+  </div>
+
+  <!-- On-screen touch controls (shown on touch devices) -->
+  <div id="touch">
+    <div class="t-cluster t-left">
+      <button class="tbtn" data-k="left">‹</button>
+      <button class="tbtn" data-k="right">›</button>
+    </div>
+    <div class="t-cluster t-right">
+      <button class="tbtn" data-k="brake">⊘</button>
+      <button class="tbtn" data-k="down">▾</button>
+      <button class="tbtn tbtn-go" data-k="up">▲</button>
+    </div>
+  </div>
+
+  <!-- Menu overlay -->
+  <div id="overlay">
+    <div class="menu">
+      <h1>Open <span class="accent">Roads</span></h1>
+      <div class="sub">A scenic procedural drive. Cruise in Zen, or take on the Challenge across road & wild terrain.</div>
+      <div id="coin-bal">🪙 <b id="coin-bal-n">0</b> coins</div>
+
+      <div class="group-title">Choose a mode</div>
+      <div class="choices" id="mode-choices"></div>
+
+      <div class="group-title">Choose your vehicle</div>
+      <div class="choices" id="vehicle-choices"></div>
+
+      <div class="group-title">Choose a season</div>
+      <div class="choices seasons" id="season-choices"></div>
+
+      <div class="group-title">Settings</div>
+      <div id="settings-row">
+        <div class="set-vol">
+          <span>Volume</span>
+          <input type="range" id="vol" min="0" max="100" value="90">
+          <span id="vol-val">90</span>
+        </div>
+        <div class="choices" id="quality-choices"></div>
+        <div class="q-caption">Graphics quality — higher looks sharper with more detail &amp; shadows; lower runs smoother on slower devices. Applies on your next run.</div>
+      </div>
+
+      <button id="start-btn">Start the Run →</button>
+      <div class="footnote">Arrow keys to drive · Spacebar to brake · Best enjoyed in fullscreen</div>
+    </div>
+  </div>
+
+  <!-- Win overlay -->
+  <div id="win-overlay">
+    <div class="menu">
+      <h1>🏁 <span class="accent">All Missions Complete!</span></h1>
+      <div class="sub">You cleared the whole list. Nicely driven.</div>
+      <div class="wstat">
+        <div><div class="v" id="win-time">0:00</div><div class="k">Time</div></div>
+        <div><div class="v" id="win-dist">0.0 km</div><div class="k">Distance</div></div>
+      </div>
+      <button id="replay-btn" style="pointer-events:auto;cursor:pointer;margin-top:24px;font-size:16px;font-weight:700;color:#16202e;background:linear-gradient(90deg,#aee0cc,#aeccff);border:none;border-radius:14px;padding:14px 44px;">Drive Again →</button>
+    </div>
+  </div>
+
+  <script src="lib/three.min.js"></script>
+  <script src="lib/GLTFLoader.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
