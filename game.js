@@ -11,17 +11,20 @@ const VEHICLES = {
   car: {
     name: 'Muscle Car', icon: '🏎️', desc: 'American V8 muscle',
     maxSpeed: 220, accel: 13, grip: 1.05, mass: 1.0, len: 2.0, turn: 1.7,
-    wheel: { r: 0.5, offX: 1.02, offZ: 1.55 }, engine: 'mid'
+    wheel: { r: 0.5, offX: 1.02, offZ: 1.55 }, engine: 'mid',
+    brake: 62, suspK: 100, suspD: 15   // balanced stop power + suspension feel
   },
   bike: {
     name: 'Chopper', icon: '🏍️', desc: 'Raked-out American chopper',
     maxSpeed: 230, accel: 15, grip: 0.9, mass: 0.6, len: 1.7, turn: 2.0,
-    wheel: { r: 0.62, offX: 0.0, offZ: 1.45 }, engine: 'high'
+    wheel: { r: 0.62, offX: 0.0, offZ: 1.45 }, engine: 'high',
+    brake: 78, suspK: 62, suspD: 10    // strong brakes, soft floppy ride
   },
   truck: {
     name: 'Big Rig', icon: '🚛', desc: 'Optimus-style hauler',
     maxSpeed: 160, accel: 8.5, grip: 1.3, mass: 2.4, len: 3.0, turn: 1.25,
-    wheel: { r: 0.68, offX: 1.3, offZ: 2.5 }, engine: 'low'
+    wheel: { r: 0.68, offX: 1.3, offZ: 2.5 }, engine: 'low',
+    brake: 55, suspK: 140, suspD: 20   // heavy, stiff, longer to haul down
   }
 };
 
@@ -234,13 +237,33 @@ const Missions = {
 let selectedVehicle = 'car';
 let selectedSeason = 'summer';
 
+// ---------------------------------------------------------------------------
+// Persistence — localStorage can throw (private mode, quota, disabled storage)
+// or hold corrupt values. Every read/write goes through these guards so a
+// storage failure degrades to in-memory defaults instead of breaking boot.
+// ---------------------------------------------------------------------------
+const SAVE_VERSION = 1;
+function lsGet(key, fallback) {
+  try { const v = localStorage.getItem(key); return v == null ? fallback : v; }
+  catch (e) { return fallback; }
+}
+function lsSet(key, value) {
+  try { localStorage.setItem(key, String(value)); return true; }
+  catch (e) { return false; }   // quota / private mode — keep running in memory
+}
+// one-time schema bookkeeping for future migrations
+(function initSaveSchema() {
+  const v = parseInt(lsGet('openroads_ver', '0'), 10) || 0;
+  if (v < SAVE_VERSION) lsSet('openroads_ver', SAVE_VERSION);
+})();
+
 const State = {
   running: false, paused: false, muted: false,
   speed: 0,          // signed, m/s along road
   steer: 0,          // -1..1 visual lean
   lateral: 0,        // x offset on road
   distance: 0,       // metres travelled (forward only, for HUD)
-  best: parseFloat(localStorage.getItem('openroads_best') || '0'),
+  best: parseFloat(lsGet('openroads_best', '0')) || 0,
   s: 0,              // car's projected arc-length on the path (for road extension/recycling)
   carX: 0, carZ: 0,  // free-roam world position
   vx: 0, vz: 0,      // velocity vector (world) — diverges from heading when drifting
@@ -251,6 +274,14 @@ const State = {
   autodrive: false,  // hands-off cruising (Zen)
   // suspension / weight transfer (visual chassis dynamics)
   prevSpeed: 0, pitchS: 0, rollS: 0, suspComp: 0, suspVel: 0,
+  launchT: 0,        // seconds of throttle held from near-rest (launch-control window)
+  driftDist: 0,      // metres of sustained drift this run (rewards coins)
+  _driftReward: 0,   // last drift milestone already paid out (metres)
+  minimap: true,     // minimap visible (toggle N)
+  // time-trial state
+  ttFinished: false, ttSampleT: 0,
+  // tutorial state
+  tutStep: -1, tutT: 0,
   // mission run state
   jumpY: 0, vy: 0, airborne: false,
   hold70: 0,         // seconds held >= 70 km/h
@@ -267,12 +298,12 @@ const keys = { up: false, down: false, left: false, right: false, brake: false, 
 
 // Persisted user settings (volume + graphics quality)
 const Settings = {
-  volume: (() => { const v = parseFloat(localStorage.getItem('openroads_vol')); return isNaN(v) ? 0.9 : v; })(),
-  quality: localStorage.getItem('openroads_quality') || 'med'
+  volume: (() => { const v = parseFloat(lsGet('openroads_vol', '')); return isNaN(v) ? 0.9 : Math.max(0, Math.min(1, v)); })(),
+  quality: (() => { const q = lsGet('openroads_quality', 'med'); return ['low', 'med', 'high'].includes(q) ? q : 'med'; })()
 };
 function setVolume(v) {
   Settings.volume = Math.max(0, Math.min(1, v));
-  localStorage.setItem('openroads_vol', String(Settings.volume));
+  lsSet('openroads_vol', Settings.volume);
   if (Audio.masterGain && Audio.ctx) Audio.masterGain.gain.setTargetAtTime(State.muted ? 0 : Settings.volume, Audio.ctx.currentTime, 0.05);
 }
 function applyQuality() {
@@ -281,25 +312,33 @@ function applyQuality() {
   const dpr = window.devicePixelRatio || 1;
   renderer.setPixelRatio(q === 'low' ? 1 : Math.min(dpr, q === 'high' ? 2 : 1.5));
   renderer.shadowMap.enabled = q !== 'low';
-  if (sunLight) sunLight.castShadow = q !== 'low';
+  if (sunLight) {
+    sunLight.castShadow = q !== 'low';
+    // scale shadow resolution with quality: cheaper on low-end, crisper on high-end
+    const sz = q === 'high' ? 2048 : (q === 'low' ? 512 : 1024);
+    if (sunLight.shadow.mapSize.x !== sz) {
+      sunLight.shadow.mapSize.set(sz, sz);
+      if (sunLight.shadow.map) { sunLight.shadow.map.dispose(); sunLight.shadow.map = null; }
+    }
+  }
 }
 function setQuality(q) {
   Settings.quality = q;
-  localStorage.setItem('openroads_quality', q);
+  lsSet('openroads_quality', q);
   applyQuality();
 }
 
 // Progression: earn coins by driving/smashing/missions; spend them to unlock vehicles.
 const Progress = {
-  coins: parseInt(localStorage.getItem('openroads_coins') || '0', 10) || 0,
-  unlocked: (() => { try { return JSON.parse(localStorage.getItem('openroads_unlocked')) || {}; } catch (e) { return {}; } })()
+  coins: parseInt(lsGet('openroads_coins', '0'), 10) || 0,
+  unlocked: (() => { try { return JSON.parse(lsGet('openroads_unlocked', '{}')) || {}; } catch (e) { return {}; } })()
 };
 const UNLOCK_COST = { bike: 400, truck: 1200 };   // car is free
 function isUnlocked(v) { return v === 'car' || !!Progress.unlocked[v]; }
 function addCoins(n) { Progress.coins += n; }
 function saveProgress() {
-  localStorage.setItem('openroads_coins', String(Math.floor(Progress.coins)));
-  localStorage.setItem('openroads_unlocked', JSON.stringify(Progress.unlocked));
+  lsSet('openroads_coins', Math.floor(Progress.coins));
+  lsSet('openroads_unlocked', JSON.stringify(Progress.unlocked));
 }
 function tryUnlock(v) {
   if (isUnlocked(v)) return true;
@@ -319,8 +358,14 @@ let roadGroup, terrainGroup, sceneryPool = [];
 let particleSystem = null, particleData = null;
 let rainStreaks = null;
 
-let camShake = 0;
-function shakeCamera(amount) { camShake = Math.min(1.2, camShake + amount); }
+let camShake = 0, camShakeDecay = 6, camShakeRoll = 0;
+// type: 'sharp' = quick high-freq rattle (landings, rumble); 'roll' = bigger, slower,
+// rolls the camera (heavy smashes). Decay rate is chosen so each event reads distinctly.
+function shakeCamera(amount, type) {
+  camShake = Math.min(1.2, camShake + amount);
+  if (type === 'roll') { camShakeDecay = 3.5; camShakeRoll = Math.min(0.09, camShakeRoll + amount * 0.12); }
+  else { camShakeDecay = 9; }   // sharp: fast settle so it punches without lingering
+}
 
 const ROAD_WIDTH = 13;
 let roadMesh = null;
@@ -441,6 +486,13 @@ function initThree() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // Correct gamma (r128 defaults to LinearEncoding, which reads washed/dark) plus a
+  // gentle ACES curve. ACES tone-maps highlights, so the toon bands stay vivid without
+  // the additive sun+ambient+hemi sum clipping to white. Exposure nudged up to keep the
+  // overall brightness the per-season lighting was originally tuned for.
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.1;
   document.getElementById('game').appendChild(renderer.domElement);
 
   // Lights
@@ -616,6 +668,7 @@ function makeFacadeTexture(base, cols, rows) {
   // darker ground-floor / storefront band
   x.fillStyle = 'rgba(0,0,0,0.28)'; x.fillRect(0, ch - gh * 1.2, cw, gh * 1.2);
   const tex = new THREE.CanvasTexture(cv);
+  tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter;
   if (renderer) tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
   FACADE_CACHE[key] = tex; return tex;
 }
@@ -646,6 +699,7 @@ function makeRoadTexture(S) {
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(1, ROAD_LEN / ROAD_TILE);
+  tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.anisotropy = renderer ? renderer.capabilities.getMaxAnisotropy() : 1;
   return tex;
 }
@@ -1263,10 +1317,10 @@ function updateInteractables(dt) {
         o.broken = true; o.breakT = 0;        // collapse it (see broken animation above)
         addCoins(15);
         Missions.complete(o.type);
-        playSmash();
+        playSmash(o.type);
         // smashing through costs less speed the faster you hit it
         State.speed *= (Math.abs(State.speed) * 3.6 > 50) ? 0.7 : 0.45;
-        shakeCamera(0.5);
+        shakeCamera(0.5, 'roll');
       }
     }
   });
@@ -1592,7 +1646,7 @@ function resolveCollisions(dt) {
         o.broken = true; o.breakT = 0;          // smash through it
         State.speed *= 0.92;
         addCoins(10);                            // reward for demolition
-        if (smashCooldown <= 0) { playSmash(); shakeCamera(0.35); smashCooldown = 0.12; }
+        if (smashCooldown <= 0) { playSmash(o.kind); shakeCamera(0.35, 'roll'); smashCooldown = 0.12; }
       } else {
         const d = Math.sqrt(d2);                 // soft push-out
         const push = minD - d;
@@ -1621,17 +1675,23 @@ function update(dt) {
   // --- throttle / brake / reverse ---
   // engine torque tapers as you approach top speed (feels punchy off the line)
   if (keys.brake) {
-    const dec = 48; // firm, progressive brake
+    const dec = V.brake || 60; // per-vehicle stopping power (bike bites hardest, rig least)
     if (State.speed > 0) State.speed = Math.max(0, State.speed - dec * dt);
     else if (State.speed < 0) State.speed = Math.min(0, State.speed + dec * dt);
+    State.launchT = 0;
   } else if (keys.up) {
-    // torque fades hard near the top end, so high speed is earned, not instant
-    const torque = V.accel * (1 - 0.85 * Math.max(0, State.speed) / maxMs);
+    // Launch control: brief full-torque window off the line, then the taper eases in so
+    // the top end is still earned (was a flat 0.85 taper — felt gutless from a standstill).
+    State.launchT = Math.min(0.35, State.launchT + dt);
+    const launch = 1 - State.launchT / 0.35;                 // 1 → 0 over the first 0.35s
+    const taper = (0.6 - 0.45 * launch) * Math.max(0, State.speed) / maxMs;
+    const torque = V.accel * (1 - taper);
     State.speed += torque * dt;
   } else if (keys.down) {
-    // brake first if moving forward, otherwise accelerate in reverse
+    State.launchT = 0;
+    // brake first if moving forward, otherwise accelerate in reverse (now punchier)
     if (State.speed > 0.5) State.speed -= V.accel * 1.3 * dt;
-    else State.speed -= V.accel * 0.55 * dt;
+    else State.speed -= V.accel * 0.75 * dt;
   } else if (autoOn && !userThrottle) {
     // ease toward a relaxed cruise (~62% of top speed)
     const cruise = maxMs * 0.62;
@@ -1641,6 +1701,7 @@ function update(dt) {
     const drag = (4 + Math.abs(State.speed) * 0.18) * dt;
     if (State.speed > 0) State.speed = Math.max(0, State.speed - drag);
     else if (State.speed < 0) State.speed = Math.min(0, State.speed + drag);
+    State.launchT = 0;   // lifting off re-arms the next standstill launch
   }
   if (keys.drift && State.speed > 0) State.speed *= (1 - dt * 0.5);   // handbrake bleeds speed
   State.speed = Math.max(-maxMs * 0.28, Math.min(maxMs, State.speed));
@@ -1660,8 +1721,12 @@ function update(dt) {
     const steerInput = (keys.left ? 1 : 0) - (keys.right ? 1 : 0);
     const returnRate = steerInput === 0 ? 9 : 7;
     State.steer += (steerInput - State.steer) * Math.min(1, dt * returnRate);
-    // can't pivot when stopped; calmer at top speed so it stays controllable
-    const turnAuth = V.turn * V.grip * Math.min(1, absSpeed / 7) * (1 - 0.42 * Math.min(1, absSpeed / maxMs));
+    // Authority reaches full by ~3.5 m/s instead of 7 (tight turns/donuts come alive once
+    // rolling) but is still 0 at a true standstill (no tank-pivot). High-speed bleed is
+    // gentler too (was 0.42 → felt mushy up top; 0.2 keeps it carveable).
+    const lowAuth = Math.min(1, absSpeed / 3.5);
+    const highAuth = 1 - 0.2 * Math.min(1, absSpeed / maxMs);
+    const turnAuth = V.turn * V.grip * lowAuth * highAuth;
     State.heading += State.steer * turnAuth * dt * Math.sign(State.speed || 1) * STEER_DIR;
   }
 
@@ -1685,6 +1750,18 @@ function update(dt) {
   if (State.distance - State._lastCoinD >= 50) {
     addCoins(Math.floor((State.distance - State._lastCoinD) / 50));
     State._lastCoinD = State.distance;
+  }
+
+  // --- drift reward: sustained sideways slip at speed banks distance → coins ---
+  if (State.slip > 0.35 && absSpeed > 8) {
+    State.driftDist += absSpeed * dt;
+    if (State.driftDist - State._driftReward >= 50) {
+      State._driftReward = State.driftDist;
+      addCoins(10);
+      showToast('🌀 Drift! +10', Math.round(State.driftDist) + ' m banked');
+    }
+  } else if (State.slip < 0.15) {
+    State.driftDist = State._driftReward = 0;   // chain breaks when grip recovers
   }
 
   // road keeps generating ahead of wherever the car projects onto it; off-road
@@ -1756,8 +1833,9 @@ function update(dt) {
   // body roll: leans outward as you turn (heavier vehicles lean more)
   const rollTarget = State.steer * speedFactor * 0.13 * Math.min(1.4, V.mass);
   State.rollS += (rollTarget - State.rollS) * Math.min(1, dt * 7);
-  // vertical suspension spring (settles bumps, compresses+rebounds on landing)
-  State.suspVel += (-State.suspComp) * 90 * dt - State.suspVel * 13 * dt;
+  // vertical suspension spring (settles bumps, compresses+rebounds on landing) —
+  // per-vehicle: truck stiff & well-damped, chopper soft & floppy, car balanced
+  State.suspVel += (-State.suspComp) * (V.suspK || 90) * dt - State.suspVel * (V.suspD || 13) * dt;
   State.suspComp += State.suspVel * dt;
   const bounce = Math.sin(clock.elapsedTime * 8) * 0.012 * speedFactor;
 
@@ -1788,7 +1866,10 @@ function update(dt) {
   updateParticles(dt);
   updateCamera(dt, speedFactor);
   updateAudio(dt, maxMs);
+  updateTimeTrial(dt);
+  updateTutorial(dt);
   updateHUD();
+  drawMinimap();
 }
 
 function updateCamera(dt, speedFactor) {
@@ -1807,7 +1888,12 @@ function updateCamera(dt, speedFactor) {
   if (camShake > 0.001) {
     camera.position.x += (Math.random() - 0.5) * camShake;
     camera.position.y += (Math.random() - 0.5) * camShake * 0.6;
-    camShake *= Math.max(0, 1 - dt * 6);
+    camShake *= Math.max(0, 1 - dt * camShakeDecay);
+  }
+  // heavy hits also roll the horizon briefly, which reads more like an impact than jitter
+  if (camShakeRoll > 0.0005) {
+    camShakeRoll *= Math.max(0, 1 - dt * 3.5);
+    look.x += (Math.random() - 0.5) * camShakeRoll * 30;
   }
   camera.lookAt(look);
 
@@ -1840,7 +1926,7 @@ function updateHUD() {
 function updateModePill() {
   const pill = document.getElementById('mode-pill');
   if (!pill) return;
-  document.getElementById('mode-name').textContent = State.mode === 'zen' ? 'Zen Drive' : 'Challenge';
+  document.getElementById('mode-name').textContent = (MODES[State.mode] || {}).name || 'Challenge';
   pill.classList.toggle('auto', State.autodrive);
 }
 
@@ -1889,8 +1975,179 @@ function winRun() {
   document.getElementById('win-time').textContent = mm + ':' + String(ss).padStart(2, '0');
   document.getElementById('win-dist').textContent = (State.distance / 1000).toFixed(2) + ' km';
   document.getElementById('win-overlay').classList.add('show');
+  clearRunHud();
   if (Audio.engineGain && Audio.ctx) Audio.engineGain.gain.setTargetAtTime(0, Audio.ctx.currentTime, 0.3);
   playFanfare();
+}
+
+function fmtTime(s) {
+  const mm = Math.floor(s / 60), ss = Math.floor(s % 60), cs = Math.floor((s % 1) * 100);
+  return mm + ':' + String(ss).padStart(2, '0') + '.' + String(cs).padStart(2, '0');
+}
+
+// ---------------------------------------------------------------------------
+// Minimap — heading-up top-down radar of the road, objectives, finish & ghost
+// ---------------------------------------------------------------------------
+// hide run-only HUD + drop the ghost when a run ends or we return to the menu
+function clearRunHud() {
+  const mm = document.getElementById('minimap'); if (mm) mm.style.display = 'none';
+  showTutBanner(null);
+  if (ghostGroup) { scene.remove(ghostGroup); ghostGroup = null; }
+}
+const MINIMAP_RANGE = 150;   // metres from centre to edge
+function drawMinimap() {
+  const cv = document.getElementById('minimap');
+  if (!cv || cv.style.display === 'none') return;
+  const g = cv.getContext('2d');
+  if (!g || !PATH.nodes.length) return;
+  const W = cv.width, H = cv.height, cx = W / 2, cy = H / 2, R = W / 2;
+  const scale = R / MINIMAP_RANGE;
+  const ch = Math.cos(State.heading), sh = Math.sin(State.heading);
+  // world → heading-up screen (car forward = up)
+  const toScreen = (wx, wz) => {
+    const dx = wx - State.carX, dz = wz - State.carZ;
+    return [cx + (dx * ch - dz * sh) * scale, cy - (dx * sh + dz * ch) * scale];
+  };
+  g.clearRect(0, 0, W, H);
+  g.save();
+  g.beginPath(); g.arc(cx, cy, R - 2, 0, Math.PI * 2); g.clip();
+  // road ribbon
+  const n = PATH.nodes;
+  g.lineWidth = Math.max(3, ROAD_WIDTH * scale);
+  g.strokeStyle = 'rgba(185,205,225,0.55)'; g.lineCap = 'round'; g.lineJoin = 'round';
+  g.beginPath();
+  for (let i = 0; i < n.length; i++) { const [sx, sy] = toScreen(n[i].x, n[i].z); i ? g.lineTo(sx, sy) : g.moveTo(sx, sy); }
+  g.stroke();
+  // challenge objectives still outstanding
+  if (State.mode === 'challenge') {
+    interactables.forEach(o => {
+      if (o.hit || o.broken || !o.mesh) return;
+      const [sx, sy] = toScreen(o.mesh.position.x, o.mesh.position.z);
+      g.fillStyle = '#ffd27a'; g.beginPath(); g.arc(sx, sy, 3.4, 0, Math.PI * 2); g.fill();
+    });
+  }
+  // time-trial finish + ghost blip
+  if (State.mode === 'timetrial' && !State.ttFinished) {
+    const remain = TT_DIST - State.distance;
+    if (remain > 0 && remain < PATH_AHEAD) {
+      const sp = samplePath(State.s + remain); const [sx, sy] = toScreen(sp.x, sp.z);
+      g.fillStyle = '#aee0cc'; g.fillRect(sx - 5, sy - 5, 10, 10);
+    }
+    if (ghostGroup) { const [gx, gy] = toScreen(ghostGroup.position.x, ghostGroup.position.z); g.fillStyle = '#9ad0ff'; g.beginPath(); g.arc(gx, gy, 3.4, 0, Math.PI * 2); g.fill(); }
+  }
+  g.restore();
+  // car arrow (always points up) + bezel
+  g.fillStyle = '#ff6a4d';
+  g.beginPath(); g.moveTo(cx, cy - 7); g.lineTo(cx - 5, cy + 6); g.lineTo(cx + 5, cy + 6); g.closePath(); g.fill();
+  g.strokeStyle = 'rgba(255,255,255,0.22)'; g.lineWidth = 2;
+  g.beginPath(); g.arc(cx, cy, R - 2, 0, Math.PI * 2); g.stroke();
+}
+
+// ---------------------------------------------------------------------------
+// Practice tutorial — guided control walkthrough, advances as you do each thing
+// ---------------------------------------------------------------------------
+const Tut = { baseHeading: 0, baseCam: 0, wasFast: false };
+const TUT_STEPS = [
+  { msg: '▲  Hold UP (or W) to accelerate', done: () => Math.abs(State.speed) * 3.6 > 25 },
+  { msg: '◀ ▶  Steer with LEFT / RIGHT', done: () => Math.abs(((State.heading - Tut.baseHeading + Math.PI * 3) % (Math.PI * 2)) - Math.PI) > 0.6 },
+  { msg: 'SPACE  — get some speed, then brake to a full stop', done: () => Tut.wasFast && Math.abs(State.speed) < 1.2 },
+  { msg: 'SHIFT  — hold it while turning hard to drift', done: () => State.slip > 0.45 },
+  { msg: 'C  — press to cycle the camera view', done: () => State.camMode !== Tut.baseCam },
+  { msg: "🎉  You're ready! Open the menu (Esc) to pick Challenge, Time Trial or Zen.", done: () => false, hold: 5 }
+];
+function showTutBanner(msg) {
+  const b = document.getElementById('tut-banner');
+  if (!b) return;
+  if (msg == null) { b.style.display = 'none'; return; }
+  b.textContent = msg; b.style.display = 'block';
+}
+function startTutorial() {
+  State.tutStep = 0; State.tutT = 0;
+  Tut.baseHeading = State.heading; Tut.baseCam = State.camMode; Tut.wasFast = false;
+  showTutBanner(TUT_STEPS[0].msg);
+}
+function updateTutorial(dt) {
+  if (State.mode !== 'practice' || State.tutStep < 0) return;
+  State.tutT += dt;
+  if (Math.abs(State.speed) * 3.6 > 55) Tut.wasFast = true;
+  const step = TUT_STEPS[State.tutStep];
+  if (step.done()) {
+    playDing();
+    State.tutStep++;
+    if (State.tutStep >= TUT_STEPS.length) { showTutBanner(null); State.tutStep = -1; return; }
+    State.tutT = 0; Tut.baseHeading = State.heading; Tut.baseCam = State.camMode; Tut.wasFast = false;
+    showTutBanner(TUT_STEPS[State.tutStep].msg);
+  } else if (step.hold && State.tutT > step.hold) {
+    showTutBanner(null); State.tutStep = -1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Time Trial + ghost replay — race a fixed track against your best run
+// ---------------------------------------------------------------------------
+const TT_SEED = 73501;   // fixed track for fair comparison
+const TT_DIST = 2000;    // metres to the finish
+let ghostGroup = null, ghostData = null, ghostBestMs = 0, ghostRec = [], ttMile = 0;
+function ttKeyBest() { return 'openroads_tt_best_' + selectedVehicle; }
+function ttKeyGhost() { return 'openroads_tt_ghost_' + selectedVehicle; }
+function loadGhost() {
+  ghostData = null;
+  ghostBestMs = parseFloat(lsGet(ttKeyBest(), '')) || 0;
+  try { const raw = lsGet(ttKeyGhost(), ''); if (raw) { const gd = JSON.parse(raw); if (gd && gd.dt && gd.samples && gd.samples.length) ghostData = gd; } } catch (e) { ghostData = null; }
+}
+function buildGhost() {
+  if (ghostGroup) { scene.remove(ghostGroup); ghostGroup = null; }
+  if (!ghostData || !vehicleGroup || typeof vehicleGroup.clone !== 'function') return;
+  ghostGroup = vehicleGroup.clone(true);
+  ghostGroup.traverse(o => {
+    if (o.material) {
+      o.material = (o.material.clone ? o.material.clone() : o.material);
+      if (o.material) { o.material.transparent = true; o.material.opacity = 0.32; o.material.depthWrite = false; }
+    }
+  });
+  scene.add(ghostGroup);
+}
+function recordGhostSample(dt) {
+  State.ttSampleT += dt;
+  if (State.ttSampleT >= 0.1) {
+    State.ttSampleT -= 0.1;
+    ghostRec.push([+State.carX.toFixed(2), +State.carZ.toFixed(2), +State.heading.toFixed(3)]);
+  }
+}
+function playGhost(elapsed) {
+  if (!ghostGroup || !ghostData) return;
+  const s = ghostData.samples, idx = elapsed / ghostData.dt, i0 = Math.floor(idx);
+  if (i0 >= s.length - 1) { const L = s[s.length - 1]; ghostGroup.position.set(L[0], heightAt(L[0], L[1]) + 0.1, L[1]); ghostGroup.rotation.y = L[2]; return; }
+  const a = s[i0], b = s[i0 + 1], f = idx - i0;
+  const x = a[0] + (b[0] - a[0]) * f, z = a[1] + (b[1] - a[1]) * f;
+  ghostGroup.position.set(x, heightAt(x, z) + 0.1, z);
+  let dh = ((b[2] - a[2] + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+  ghostGroup.rotation.y = a[2] + dh * f;
+}
+function ttComplete() {
+  State.ttFinished = true; State.running = false;
+  const elapsed = clock.elapsedTime - State.runStart;
+  addCoins(120);
+  const prevBest = ghostBestMs;
+  const isRecord = !prevBest || elapsed < prevBest;
+  if (isRecord) { lsSet(ttKeyBest(), elapsed); lsSet(ttKeyGhost(), JSON.stringify({ dt: 0.1, samples: ghostRec })); }
+  saveProgress();
+  document.getElementById('win-title').innerHTML = isRecord ? '⏱️ <span class="accent">New Record!</span>' : '⏱️ <span class="accent">Time Trial Complete</span>';
+  document.getElementById('win-sub').textContent = isRecord ? 'Your fastest run yet — ghost saved for next time.' : (prevBest ? 'Best so far: ' + fmtTime(prevBest) : 'Run saved.');
+  document.getElementById('win-time').textContent = fmtTime(elapsed);
+  document.getElementById('win-dist').textContent = (State.distance / 1000).toFixed(2) + ' km';
+  document.getElementById('win-overlay').classList.add('show');
+  clearRunHud();
+  if (Audio.engineGain && Audio.ctx) Audio.engineGain.gain.setTargetAtTime(0, Audio.ctx.currentTime, 0.3);
+  playFanfare();
+}
+function updateTimeTrial(dt) {
+  if (State.mode !== 'timetrial' || State.ttFinished) return;
+  recordGhostSample(dt);
+  playGhost(clock.elapsedTime - State.runStart);
+  const mile = Math.floor(State.distance / 500);
+  if (mile > ttMile) { ttMile = mile; const left = TT_DIST - State.distance; if (left > 0) showToast('⏱️ ' + (left / 1000).toFixed(1) + ' km to go', ''); }
+  if (State.distance >= TT_DIST) ttComplete();
 }
 
 // ---------------------------------------------------------------------------
@@ -1902,10 +2159,12 @@ const Audio = {
   engineGain: null, engineFilter: null, engineShaper: null,
   tyreSrc: null, tyreFilter: null, tyreGain: null,
   windFilter: null, windGain: null,
-  ambGain: null, ambNodes: [], masterGain: null,
+  ambGain: null, ambNodes: [], masterGain: null, limiter: null, pan: null,
   // sampled (CC0) sounds
-  buffers: {}, sampleEngine: null, sampleEngineGain: null, useSample: false, skidCD: 0
+  buffers: {}, sampleEngine: null, sampleEngineGain: null, useSample: false, skidCD: 0,
+  gear: 1, gearBlip: 0   // simulated gearbox for engine pitch (discrete RPM bands)
 };
+const NUM_GEARS = 5;
 
 // CC0 Kenney racing audio (decoded into AudioBuffers; synth is the fallback)
 const SOUND_URLS = { engine: 'assets/audio/engine.ogg', engineBike: 'assets/audio/engine-bike.ogg',
@@ -1937,7 +2196,9 @@ function playSample(name, gain, rate) {
   if (!ctx || State.muted || !buf) return false;
   const src = ctx.createBufferSource(); src.buffer = buf; if (rate) src.playbackRate.value = rate;
   const g = ctx.createGain(); g.gain.value = gain == null ? 1 : gain;
-  src.connect(g); g.connect(Audio.masterGain); src.start();
+  src.connect(g); g.connect(Audio.masterGain);
+  src.onended = () => { try { src.disconnect(); g.disconnect(); } catch (e) {} };
+  src.start();
   return true;
 }
 
@@ -1963,7 +2224,21 @@ function initAudio() {
 
   Audio.masterGain = ctx.createGain();
   Audio.masterGain.gain.value = State.muted ? 0 : Settings.volume;
-  Audio.masterGain.connect(ctx.destination);
+  // Bus everything through a limiter before the speakers: synth engine + sampled engine +
+  // tyre + wind + one-shot SFX can sum past 0 dBFS and clip. A compressor tames the peaks
+  // and keeps loudness steady instead of jumping when several sources hit at once.
+  if (ctx.createDynamicsCompressor) {
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -6; comp.knee.value = 6; comp.ratio.value = 4;
+    comp.attack.value = 0.003; comp.release.value = 0.25;
+    Audio.masterGain.connect(comp); comp.connect(ctx.destination);
+    Audio.limiter = comp;
+  } else {
+    Audio.masterGain.connect(ctx.destination);
+  }
+  // stereo placement for rolling noise (panned by steering/slip so corners feel directional)
+  Audio.pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  if (Audio.pan) Audio.pan.connect(Audio.masterGain);
 
   // --- Engine: sub + 3 detuned voices → waveshaper grit → lowpass ---
   // grit differs per vehicle: truck = smooth rumble, car = muscle, bike = raspy
@@ -1993,10 +2268,11 @@ function initAudio() {
   Audio.tyreFilter = ctx.createBiquadFilter(); Audio.tyreFilter.type = 'bandpass';
   Audio.tyreFilter.frequency.value = 900; Audio.tyreFilter.Q.value = 0.7;
   Audio.tyreGain = ctx.createGain(); Audio.tyreGain.gain.value = 0;
-  Audio.tyreSrc.connect(Audio.tyreFilter); Audio.tyreFilter.connect(Audio.tyreGain); Audio.tyreGain.connect(Audio.masterGain);
+  const roadBus = Audio.pan || Audio.masterGain;
+  Audio.tyreSrc.connect(Audio.tyreFilter); Audio.tyreFilter.connect(Audio.tyreGain); Audio.tyreGain.connect(roadBus);
   Audio.windFilter = ctx.createBiquadFilter(); Audio.windFilter.type = 'highpass'; Audio.windFilter.frequency.value = 2200;
   Audio.windGain = ctx.createGain(); Audio.windGain.gain.value = 0;
-  Audio.tyreSrc.connect(Audio.windFilter); Audio.windFilter.connect(Audio.windGain); Audio.windGain.connect(Audio.masterGain);
+  Audio.tyreSrc.connect(Audio.windFilter); Audio.windFilter.connect(Audio.windGain); Audio.windGain.connect(roadBus);
   Audio.tyreSrc.start();
 
   buildAmbient();
@@ -2006,7 +2282,7 @@ function initAudio() {
 
 function buildAmbient() {
   // remove old ambient
-  Audio.ambNodes.forEach(n => { try { n.stop && n.stop(); } catch (e) {} });
+  Audio.ambNodes.forEach(n => { try { n.stop && n.stop(); n.disconnect && n.disconnect(); } catch (e) {} });
   Audio.ambNodes = [];
   const ctx = Audio.ctx;
   if (!ctx) return;
@@ -2052,36 +2328,57 @@ function updateAudio(dt, maxMs) {
 
   // engine pitch base by vehicle type; idle hum even at rest
   const base = V.engine === 'low' ? 36 : (V.engine === 'high' ? 76 : 52);
-  const rpm = base + sp * (V.engine === 'high' ? 360 : 230);
-  Audio.engineOsc.frequency.setTargetAtTime(rpm, t, 0.07);
-  Audio.engineOsc2.frequency.setTargetAtTime(rpm * 0.5, t, 0.07);
-  Audio.engineOsc3.frequency.setTargetAtTime(rpm * 1.01, t, 0.07);
-  Audio.engineSub.frequency.setTargetAtTime(rpm * 0.5, t, 0.07);
+  // Gearbox: split the speed range into gears so RPM sweeps up within a gear then drops
+  // on the shift, instead of one flat linear sweep. Pitch tracks in-gear revs, not raw speed.
+  const gear = Math.min(NUM_GEARS, 1 + Math.floor(sp * NUM_GEARS * 0.999));
+  if (gear !== Audio.gear) {
+    if (gear > Audio.gear) { Audio.gearBlip = 0.09; playGearShift(); }  // brief cut + clunk on upshift
+    Audio.gear = gear;
+  }
+  if (Audio.gearBlip > 0) Audio.gearBlip = Math.max(0, Audio.gearBlip - dt);
+  const gearLo = (gear - 1) / NUM_GEARS, gearHi = gear / NUM_GEARS;
+  const inGear = gearHi > gearLo ? (sp - gearLo) / (gearHi - gearLo) : 0;   // 0..1 revs within gear
+  const rpm = base + (0.35 + 0.65 * inGear) * (V.engine === 'high' ? 360 : 230);
+  Audio.engineOsc.frequency.setTargetAtTime(rpm, t, 0.05);
+  Audio.engineOsc2.frequency.setTargetAtTime(rpm * 0.5, t, 0.05);
+  Audio.engineOsc3.frequency.setTargetAtTime(rpm * 1.01, t, 0.05);
+  Audio.engineSub.frequency.setTargetAtTime(rpm * 0.5, t, 0.05);
   // brighter under throttle (engine "load"), darker when coasting; tone per vehicle
   const load = keys.up ? 1 : (keys.down || keys.brake ? 0.4 : 0.62);
   const toneBase = V.engine === 'low' ? 260 : (V.engine === 'high' ? 620 : 420);   // truck darker, bike brighter
   const toneRange = V.engine === 'low' ? 1400 : (V.engine === 'high' ? 2400 : 1900);
   Audio.engineFilter.frequency.setTargetAtTime(toneBase + sp * toneRange + load * 500, t, 0.09);
-  const targetGain = (0.05 + sp * 0.11) * (0.7 + load * 0.5) * (V.engine === 'low' ? 1.15 : 1);
-  Audio.engineGain.gain.setTargetAtTime(Audio.useSample ? 0 : targetGain, t, 0.1);
+  const blipDuck = Audio.gearBlip > 0 ? 0.35 : 1;   // throttle cut during an upshift
+  const targetGain = (0.05 + sp * 0.11) * (0.7 + load * 0.5) * (V.engine === 'low' ? 1.15 : 1) * blipDuck;
+  Audio.engineGain.gain.setTargetAtTime(Audio.useSample ? 0 : targetGain, t, 0.05);
 
-  // sampled engine (CC0): pitch + volume rise with revs; idles low at a standstill
+  // sampled engine (CC0): pitch tracks in-gear revs (not raw speed) + throttle-load volume,
+  // matching the synth gearbox so the swap is seamless; ducks on the shift blip too
   if (Audio.useSample && Audio.sampleEngine) {
-    Audio.sampleEngine.playbackRate.setTargetAtTime(0.7 + sp * 1.5, t, 0.08);
-    Audio.sampleEngineGain.gain.setTargetAtTime((0.25 + sp * 0.5) * (0.7 + load * 0.5), t, 0.1);
+    Audio.sampleEngine.playbackRate.setTargetAtTime(0.7 + (gear - 1) * 0.18 + inGear * 0.9, t, 0.05);
+    Audio.sampleEngineGain.gain.setTargetAtTime((0.25 + sp * 0.5) * (0.7 + load * 0.5) * blipDuck, t, 0.06);
   }
 
-  // tyre/road roar grows with speed (louder & grittier off-road), wind at high speed
+  // tyre/road roar grows with speed (louder & grittier off-road), wind at high speed;
+  // tyre timbre shifts per surface so wet/sandy/dry seasons sound distinct
   const tyre = (0.015 + sp * 0.14) * (State.offRoad ? 1.7 : 1);
-  Audio.tyreFilter.frequency.setTargetAtTime(State.offRoad ? 600 : 1100, t, 0.2);
+  const tyreHz = State.offRoad ? 600 : (SEASONS[selectedSeason].sound === 'rain' ? 1300 : (selectedSeason === 'desert' ? 1450 : 1100));
+  Audio.tyreFilter.frequency.setTargetAtTime(tyreHz, t, 0.2);
   Audio.tyreGain.gain.setTargetAtTime(Math.abs(State.speed) > 1 ? tyre : 0, t, 0.15);
   Audio.windGain.gain.setTargetAtTime(sp * sp * 0.09, t, 0.15);
+
+  // stereo pan: corner load + slip slide the rolling noise toward the turn
+  if (Audio.pan) {
+    const p = Math.max(-1, Math.min(1, State.steer * 0.5 + (State.vx * Math.cos(State.heading) - State.vz * Math.sin(State.heading)) * 0.03));
+    Audio.pan.pan.setTargetAtTime(p, t, 0.1);
+  }
 
   // skid sample on hard braking OR while drifting (tyres screech)
   if (Audio.skidCD > 0) Audio.skidCD -= dt;
   const skidding = Math.abs(State.speed) > 12 && (keys.brake || State.slip > 0.3);
   if (skidding && Audio.skidCD <= 0) {
-    if (playSample('skid', 0.5)) Audio.skidCD = 0.9;
+    // louder & more frequent the harder you're sliding (sparse 0.9s → tight 0.45s)
+    if (playSample('skid', Math.min(0.8, 0.4 + State.slip * 0.5))) Audio.skidCD = State.slip > 0.5 ? 0.45 : 0.9;
   }
 
   // ambient chirps (birds / cicada)
@@ -2110,6 +2407,7 @@ function playChirp(kind) {
   g.gain.linearRampToValueAtTime(kind === 'cicada' ? 0.04 : 0.06, t + 0.03);
   if (kind === 'birds') o.frequency.linearRampToValueAtTime(f * 1.5, t + 0.12);
   g.gain.exponentialRampToValueAtTime(0.0001, t + (kind === 'cicada' ? 0.5 : 0.22));
+  o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
   o.start(t); o.stop(t + 0.6);
 }
 
@@ -2125,6 +2423,7 @@ function playDing() {
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(0.12, t + 0.02);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+    o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
     o.start(t); o.stop(t + 0.3);
   });
 }
@@ -2141,6 +2440,7 @@ function playThud(strength) {
   const filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 220;
   const g = ctx.createGain(); g.gain.value = Math.min(0.5, 0.25 * strength);
   src.connect(filt); filt.connect(g); g.connect(Audio.masterGain);
+  src.onended = () => { try { src.disconnect(); filt.disconnect(); g.disconnect(); } catch (e) {} };
   src.start();
 }
 
@@ -2159,6 +2459,7 @@ function noiseBurst(dur, gain, filterType, freq, q) {
   const t = ctx.currentTime;
   g.gain.setValueAtTime(gain, t);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.onended = () => { try { src.disconnect(); filt.disconnect(); g.disconnect(); } catch (e) {} };
   src.start();
 }
 
@@ -2169,12 +2470,31 @@ function playSplash() {
   noiseBurst(0.25, 0.18, 'bandpass', 2600, 1.2);
 }
 
-// crash/smash — real CC0 impact sample if loaded, else synth crunch + thump
-function playSmash() {
+// crash/smash — real CC0 impact sample if loaded, else synth crunch + thump.
+// `kind` gives each material its own voice: tin barrels ring high, crates thunk mid,
+// mailboxes/signs click thin, hay/bush is a soft dull pad, trees/huts a heavy crack.
+const SMASH_VOICE = {
+  barrel:   { rate: 1.25, freq: 2400, q: 1.4, dur: 0.22, gain: 0.34, thud: 0.5 },
+  crate:    { rate: 0.95, freq: 700,  q: 1.0, dur: 0.30, gain: 0.40, thud: 0.9 },
+  mailbox:  { rate: 1.4,  freq: 4200, q: 2.0, dur: 0.10, gain: 0.30, thud: 0.3 },
+  sign:     { rate: 1.35, freq: 3600, q: 1.8, dur: 0.12, gain: 0.30, thud: 0.3 },
+  haybale:  { rate: 0.8,  freq: 420,  q: 0.6, dur: 0.30, gain: 0.30, thud: 0.5 },
+  bush:     { rate: 1.1,  freq: 3000, q: 0.5, dur: 0.16, gain: 0.22, thud: 0.2 },
+  fence:    { rate: 1.0,  freq: 1200, q: 1.0, dur: 0.26, gain: 0.36, thud: 0.7 },
+  barricade:{ rate: 1.0,  freq: 1000, q: 1.0, dur: 0.28, gain: 0.40, thud: 0.9 }
+};
+function playSmash(kind) {
   if (!Audio.ctx || State.muted) return;
-  if (playSample('impact', 0.7, 0.9 + Math.random() * 0.2)) return;
-  noiseBurst(0.35, 0.4, 'bandpass', 900, 1.0);
-  playThud(1.1);
+  const v = SMASH_VOICE[kind] || { rate: 1.0, freq: 900, q: 1.0, dur: 0.35, gain: 0.4, thud: 1.1 };
+  if (playSample('impact', 0.7, v.rate * (0.92 + Math.random() * 0.16))) { playThud(v.thud); return; }
+  noiseBurst(v.dur, v.gain, 'bandpass', v.freq, v.q);
+  playThud(v.thud);
+}
+
+// quick gearbox "clunk" on an upshift — short bandpassed noise tick
+function playGearShift() {
+  if (!Audio.ctx || State.muted) return;
+  noiseBurst(0.06, 0.12, 'bandpass', 1400, 1.6);
 }
 
 // jump touchdown — thud + a quick "sproing" rebound from the suspension
@@ -2190,6 +2510,7 @@ function playLanding() {
   g.gain.setValueAtTime(0.18, t);
   g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
   o.connect(g); g.connect(Audio.masterGain);
+  o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
   o.start(t); o.stop(t + 0.24);
 }
 
@@ -2205,6 +2526,7 @@ function playFanfare() {
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(0.14, t + 0.03);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
+    o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
     o.start(t); o.stop(t + 0.55);
   });
 }
@@ -2214,6 +2536,7 @@ function setMuted(m) {
   if (Audio.masterGain && Audio.ctx) {
     Audio.masterGain.gain.setTargetAtTime(m ? 0 : Settings.volume, Audio.ctx.currentTime, 0.1);
   }
+  showToast(m ? '🔇 Muted' : '🔊 Sound on', 'Press M to toggle');
 }
 
 // ---------------------------------------------------------------------------
@@ -2221,6 +2544,11 @@ function setMuted(m) {
 // ---------------------------------------------------------------------------
 function animate() {
   requestAnimationFrame(animate);
+  // Tab hidden: don't simulate or render — no point drawing an invisible canvas, and it
+  // saves real CPU/GPU/battery. clock.getDelta keeps accumulating, so the first visible
+  // frame just gets clamped to the 0.05 cap below rather than a huge catch-up step.
+  if (document.hidden) return;
+  pollGamepad();
   const dt = Math.min(0.05, clock.getDelta());
   if (State.running && !State.paused) {
     update(dt);
@@ -2236,6 +2564,9 @@ function animate() {
 // ---------------------------------------------------------------------------
 function bindInput() {
   window.addEventListener('keydown', e => {
+    // Browsers start the AudioContext suspended until a user gesture. Keyboard players
+    // would otherwise get a silent game until they touched the UI — wake it on any key.
+    if (Audio.ctx && Audio.ctx.state === 'suspended' && !State.paused) Audio.ctx.resume();
     switch (e.code) {
       case 'ArrowUp': case 'KeyW': keys.up = true; e.preventDefault(); break;
       case 'ArrowDown': case 'KeyS': keys.down = true; e.preventDefault(); break;
@@ -2250,6 +2581,12 @@ function bindInput() {
           showToast(State.autodrive ? '🌿 Autodrive ON' : 'Autodrive OFF', 'Press F to toggle');
         } break;
       case 'KeyM': setMuted(!State.muted); break;
+      case 'KeyN': if (State.running) {
+          State.minimap = !State.minimap;
+          const nav = (State.mode === 'challenge' || State.mode === 'timetrial');
+          document.getElementById('minimap').style.display = (nav && State.minimap) ? 'block' : 'none';
+          showToast(State.minimap ? '🗺️ Minimap on' : 'Minimap off', '');
+        } break;
       case 'KeyP': case 'Escape': if (State.running) togglePause(); break;
     }
   });
@@ -2269,6 +2606,50 @@ function bindInput() {
   });
 
   setupTouch();
+}
+
+// ---------------------------------------------------------------------------
+// Gamepad — standard mapping. Polled once per frame from animate(). To coexist
+// with keyboard/touch (which write `keys` directly), the pad only clears the
+// inputs IT asserted last frame, so an idle/plugged-in controller never fights
+// the keyboard.
+// ---------------------------------------------------------------------------
+const GP = { set: {}, cam: false, pause: false, auto: false };
+function pollGamepad() {
+  if (typeof navigator === 'undefined' || !navigator.getGamepads) return;
+  let gp = null;
+  const pads = navigator.getGamepads();
+  for (let i = 0; i < pads.length; i++) { if (pads[i] && pads[i].connected) { gp = pads[i]; break; } }
+  // release whatever the pad held last frame (leaves keyboard/touch flags alone)
+  for (const k in GP.set) { if (GP.set[k]) keys[k] = false; }
+  GP.set = {};
+  if (!gp) return;
+  const btn = gp.axes && gp.buttons ? gp.buttons : [];
+  const ax = gp.axes || [];
+  const val = i => (btn[i] ? btn[i].value : 0);
+  const down = i => (btn[i] ? btn[i].pressed : false);
+  const assert = (k, on) => { if (on) { keys[k] = true; GP.set[k] = true; } };
+
+  const sx = Math.abs(ax[0] || 0) > 0.22 ? ax[0] : 0;   // left stick X (deadzoned)
+  assert('left',  sx < -0.22 || down(14));
+  assert('right', sx >  0.22 || down(15));
+  assert('up',    val(7) > 0.15 || down(12));            // RT / dpad-up = accelerate
+  assert('down',  val(6) > 0.15 || down(13));            // LT / dpad-down = reverse
+  assert('brake', down(0));                              // A = brake
+  assert('drift', down(5) || down(1));                   // RB / B = handbrake
+  if (Audio.ctx && Audio.ctx.state === 'suspended' && !State.paused &&
+      (val(7) > 0.1 || val(6) > 0.1 || down(0))) Audio.ctx.resume();
+
+  // edge-triggered toggles (Y = camera, Start = pause, X = autodrive)
+  if (down(3) && !GP.cam && State.running) State.camMode = (State.camMode + 1) % 3;
+  GP.cam = down(3);
+  if (down(9) && !GP.pause && State.running) togglePause();
+  GP.pause = down(9);
+  if (down(2) && !GP.auto && State.running) {
+    State.autodrive = !State.autodrive; updateModePill();
+    showToast(State.autodrive ? '🌿 Autodrive ON' : 'Autodrive OFF', 'Press F / ✕ to toggle');
+  }
+  GP.auto = down(2);
 }
 
 // On-screen buttons drive the same `keys` flags as the keyboard.
@@ -2307,7 +2688,9 @@ function togglePause() {
 // ---------------------------------------------------------------------------
 const MODES = {
   challenge: { name: 'Challenge Run', icon: '🏁', desc: '10 objectives along the route' },
-  zen:       { name: 'Zen Drive',     icon: '🌿', desc: 'Just cruise · autodrive (F)' }
+  timetrial: { name: 'Time Trial',    icon: '⏱️', desc: 'Same track · race your ghost' },
+  zen:       { name: 'Zen Drive',     icon: '🌿', desc: 'Just cruise · autodrive (F)' },
+  practice:  { name: 'Practice',      icon: '🎓', desc: 'Learn the controls, no pressure' }
 };
 // graphics quality presets (sub-label shown on each chip)
 const QOPTS = [['low', 'Low', 'Best performance'], ['med', 'Medium', 'Balanced'], ['high', 'High', 'Best visuals']];
@@ -2334,7 +2717,8 @@ function buildMenu() {
     el.addEventListener('click', () => {
       State.mode = key;
       mc.querySelectorAll('.choice').forEach(c => c.classList.toggle('active', c.dataset.key === key));
-      document.getElementById('start-btn').textContent = key === 'zen' ? 'Start Driving →' : 'Start the Run →';
+      const labels = { zen: 'Start Driving →', timetrial: 'Start Time Trial →', practice: 'Start Practice →', challenge: 'Start the Run →' };
+      document.getElementById('start-btn').textContent = labels[key] || 'Start →';
     });
     mc.appendChild(el);
   });
@@ -2414,6 +2798,7 @@ function buildMenu() {
     State.paused = false;
     document.getElementById('pause-menu').classList.remove('show');
     State.running = false;
+    clearRunHud();
     saveProgress(); refreshMenu();
     document.getElementById('overlay').classList.remove('hidden');
     if (Audio.ctx) Audio.ctx.resume();
@@ -2422,6 +2807,7 @@ function buildMenu() {
   document.getElementById('best-val').textContent = (State.best / 1000).toFixed(2) + ' km';
   document.getElementById('start-btn').addEventListener('click', startGame);
   document.getElementById('replay-btn').addEventListener('click', () => {
+    clearRunHud();
     saveProgress(); refreshMenu();
     document.getElementById('win-overlay').classList.remove('show');
     document.getElementById('overlay').classList.remove('hidden');
@@ -2441,19 +2827,32 @@ function startGame() {
   ROUTE_SEED = Math.floor(Math.random() * 1e6);   // a fresh, varied route every run
   State.jumpY = 0; State.vy = 0; State.airborne = false;
   State.hold70 = 0; State.pondTime = 0; State.reverseDist = 0;
+  State.launchT = 0; State.driftDist = 0; State._driftReward = 0;
   State.wasMoving = false; State.offRoad = false; State.won = false;
+  State.ttFinished = false; State.ttSampleT = 0; ghostRec = []; ttMile = 0;
+  State.tutStep = -1; State.tutT = 0;
   window.__coneProg = '0/6';
+  // Time Trial pins a fixed seed so the track (and your ghost) are identical every run.
+  ROUTE_SEED = (State.mode === 'timetrial') ? TT_SEED : Math.floor(Math.random() * 1e6);
+  State.jumpY = 0; State.vy = 0; State.airborne = false;
+  State.hold70 = 0; State.pondTime = 0; State.reverseDist = 0;
   Missions.reset();
   State.runStart = clock.elapsedTime;
-  // Zen starts hands-off & objective-free; Challenge is manual with missions
+  // Zen starts hands-off & objective-free; Challenge/Trial/Practice are manual
   State.autodrive = (State.mode === 'zen');
   document.getElementById('missions').style.display = (State.mode === 'challenge') ? 'block' : 'none';
+  // minimap aids navigation in goal modes; off for zen/practice
+  const navMode = (State.mode === 'challenge' || State.mode === 'timetrial');
+  document.getElementById('minimap').style.display = (navMode && State.minimap) ? 'block' : 'none';
+  showTutBanner(null);
   updateModePill();
 
   document.getElementById('win-overlay').classList.remove('show');
 
+  if (State.mode === 'timetrial') loadGhost();
   buildWorld();
   buildVehicle();
+  if (State.mode === 'timetrial') buildGhost();
 
   // place camera behind
   camera.position.set(0, 5.2, -11);
@@ -2464,6 +2863,12 @@ function startGame() {
   State.running = true;
   State.paused = false;
   document.getElementById('overlay').classList.add('hidden');
+
+  // briefing: orient the player to the mode they just started
+  if (State.mode === 'challenge') showToast('🏁 ' + MISSIONS.length + ' objectives', 'First up: ' + MISSIONS[0].label);
+  else if (State.mode === 'timetrial') showToast('⏱️ ' + (TT_DIST / 1000).toFixed(1) + ' km sprint', ghostData ? 'Beat your ghost: ' + fmtTime(ghostBestMs) : 'Set a time — a ghost saves for next run');
+  else if (State.mode === 'practice') startTutorial();
+  else showToast('🌿 Zen Drive', 'Just cruise · F toggles autodrive');
 
   // try fullscreen (best effort; ignored if blocked)
   const el = document.documentElement;
@@ -2476,7 +2881,7 @@ setInterval(() => {
     const best = Math.max(State.best, State.distance);
     if (best > State.best) {
       State.best = best;
-      localStorage.setItem('openroads_best', String(best));
+      lsSet('openroads_best', best);
     }
     saveProgress();
   }

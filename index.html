@@ -274,13 +274,20 @@
     <!-- Objective toast -->
     <div id="toast"></div>
 
+    <!-- Tutorial step banner (practice mode) -->
+    <div id="tut-banner" style="position:fixed;left:50%;top:84px;transform:translateX(-50%);max-width:520px;text-align:center;padding:14px 26px;border-radius:16px;font-size:17px;font-weight:700;color:#eaf2ff;background:rgba(20,30,44,0.72);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:none;z-index:30;"></div>
+
+    <!-- Heading-up minimap (challenge / time trial) -->
+    <canvas id="minimap" width="240" height="240" style="position:fixed;left:18px;bottom:18px;width:148px;height:148px;border-radius:16px;background:rgba(20,30,44,0.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:none;z-index:20;"></canvas>
+
     <!-- mode / autodrive pill -->
     <div id="mode-pill" class="panel"><span id="mode-name">Challenge</span><span id="auto-tag">AUTO</span></div>
 
     <div id="help" class="panel">
       <div><kbd>↑</kbd> accelerate &nbsp; <kbd>↓</kbd> reverse</div>
-      <div><kbd>←</kbd> <kbd>→</kbd> steer &nbsp; <kbd>Space</kbd> brake &nbsp; <kbd>Shift</kbd> drift</div>
-      <div><kbd>C</kbd> camera &nbsp; <kbd>F</kbd> autodrive &nbsp; <kbd>M</kbd> mute &nbsp; <kbd>P</kbd> pause</div>
+      <div><kbd>←</kbd> <kbd>→</kbd> steer &nbsp; <kbd>Space</kbd> brake &nbsp; <kbd>Shift</kbd> drift (hold to slide — earns coins)</div>
+      <div><kbd>C</kbd> camera &nbsp; <kbd>F</kbd> autodrive &nbsp; <kbd>N</kbd> minimap &nbsp; <kbd>M</kbd> mute &nbsp; <kbd>P</kbd> pause</div>
+      <div>🎮 Gamepad: stick steer · RT accel · LT reverse · A brake · RB drift</div>
     </div>
   </div>
 
@@ -350,8 +357,8 @@
   <!-- Win overlay -->
   <div id="win-overlay">
     <div class="menu">
-      <h1>🏁 <span class="accent">All Missions Complete!</span></h1>
-      <div class="sub">You cleared the whole list. Nicely driven.</div>
+      <h1 id="win-title">🏁 <span class="accent">All Missions Complete!</span></h1>
+      <div class="sub" id="win-sub">You cleared the whole list. Nicely driven.</div>
       <div class="wstat">
         <div><div class="v" id="win-time">0:00</div><div class="k">Time</div></div>
         <div><div class="v" id="win-dist">0.0 km</div><div class="k">Distance</div></div>
