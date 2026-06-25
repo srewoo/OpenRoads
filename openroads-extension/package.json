@@ -1,10 +1,11 @@
 {
   "name": "openroads-extension",
-  "version": "1.0.0",
-  "description": "Open Roads — an easy soft-toned driving game with 10 missions, as a Chrome (MV3) extension.",
+  "version": "1.0.1",
+  "description": "A free browser-based driving game with 10 missions. Hit the open road and complete challenges right in your tab.",
   "private": true,
   "scripts": {
-    "build": "rm -f openroads-extension.zip && zip -r -X openroads-extension.zip manifest.json background.js game.html game.js lib assets icons -x '*.DS_Store'",
+    "sync": "cp ../game.js game.js && sed 's#https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js#lib/three.min.js#' ../index.html > game.html",
+    "build": "npm run sync && rm -f openroads-extension.zip && zip -r -X openroads-extension.zip manifest.json background.js game.html game.js lib assets icons -x '*.DS_Store'",
     "clean": "rm -f openroads-extension.zip"
   },
   "license": "MIT"

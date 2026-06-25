@@ -1,3 +1,5 @@
 openroads-extension/openroads-extension.zip
 .vscode/
 .claude/
+.DS_Store
+CLAUDE-FABLE-5.md

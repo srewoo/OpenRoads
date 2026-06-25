@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Open Roads — 10 Missions",
-  "version": "1.0.0",
-  "description": "An easy, soft-toned driving game. Pick a muscle car, chopper, or big rig and clear 10 missions across 5 seasons.",
+  "name": "Open Roads - Browser Driving Game",
+  "version": "1.0.1",
+  "description": "A free browser-based driving game with 10 missions. Hit the open road and complete challenges right in your tab.",
   "action": {
     "default_title": "Play Open Roads",
     "default_icon": {
@@ -18,11 +18,5 @@
   },
   "background": {
     "service_worker": "background.js"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": ["game.html", "game.js", "lib/three.min.js", "icons/*"],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  }
 }
