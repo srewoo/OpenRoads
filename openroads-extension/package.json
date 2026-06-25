@@ -1,7 +1,7 @@
 {
-  "name": "openroads-extension",
+  "name": "openroads - Browser Driving Gam",
   "version": "1.0.1",
-  "description": "A free browser-based driving game with 10 missions. Hit the open road and complete challenges right in your tab.",
+  "description": "Free 3D driving game — cruise, drift & race scenic open roads. Time trials, ghost races, challenges, and a chill Zen mode.",
   "private": true,
   "scripts": {
     "sync": "cp ../game.js game.js && mkdir -p lib/postprocessing lib/shaders && cp ../lib/postprocessing/*.js lib/postprocessing/ && cp ../lib/shaders/*.js lib/shaders/ && sed 's#https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js#lib/three.min.js#' ../index.html > game.html",

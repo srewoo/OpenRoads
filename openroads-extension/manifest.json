@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Open Roads - Browser Driving Game",
   "version": "1.0.1",
-  "description": "A free browser-based driving game with 10 missions. Hit the open road and complete challenges right in your tab.",
+  "description": "Free 3D driving game — cruise, drift & race scenic open roads. Time trials, ghost races, challenges, and a chill Zen mode.",
   "action": {
     "default_title": "Play Open Roads",
     "default_icon": {
