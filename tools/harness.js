@@ -25,6 +25,17 @@ function autoStub() {
 }
 const THREE = autoStub();
 
+// Deterministic Math for the sandbox: a seeded PRNG replaces Math.random so the whole
+// run is reproducible (procedural scenery/route placement no longer makes the harness
+// flaky). All other Math.* methods pass through to the real implementation.
+function seededMath() {
+  let a = 0x9e3779b9 >>> 0;                          // fixed seed
+  const rand = () => { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const M = Object.create(Math);                     // inherit sin/cos/hypot/... ; override random
+  M.random = rand;
+  return M;
+}
+
 // --- DOM stubs ---
 function elStub() {
   return new Proxy({
@@ -67,7 +78,7 @@ const sandbox = {
   requestAnimationFrame() { return 0; },     // no-op: animate() runs once, no recursion
   cancelAnimationFrame() {},
   setInterval() { return 0; }, clearInterval() {}, setTimeout() { return 0; }, clearTimeout() {},
-  performance: { now: () => 0 }, console, fetch: undefined, Math, JSON, Date, Object, Array
+  performance: { now: () => 0 }, console, fetch: undefined, Math: seededMath(), JSON, Date, Object, Array
 };
 sandbox.globalThis = sandbox;
 sandbox.self = sandbox;
@@ -89,6 +100,22 @@ code += `
   TT_DIST: (typeof TT_DIST !== 'undefined') ? TT_DIST : 2000,
   ghostStored: () => !!localStorage.getItem('openroads_tt_ghost_car'),
   hasGhost: () => (typeof ghostData !== 'undefined') && !!ghostData,
+  // compare the O(1) scenery-height shortcut against the exact nearestPathInfo scan
+  heightEquivMaxErr: () => {
+    let maxErr = 0;
+    for (let k = 0; k < 200; k++) {
+      const s = (PATH.nodes[2].s) + k * 3.1;
+      const sp = samplePath(s);
+      for (const off of [2, 8, 16, 28, 45, 70]) {
+        for (const side of [1, -1]) {
+          const wx = sp.x + sp.nx * side * off, wz = sp.z + sp.nz * side * off;
+          const err = Math.abs(heightFromPath(sp.y, off, wx, wz) - heightAt(wx, wz));
+          if (err > maxErr) maxErr = err;
+        }
+      }
+    }
+    return maxErr;
+  },
   // perfect-driver helper: snap heading to the road tangent so a straight full-throttle
   // run stays on asphalt (otherwise the harness wanders off the procedural curves).
   followRoad: () => { const i = nearestPathInfo(State.carX, State.carZ); State.heading = Math.atan2(i.hx, i.hz); }
@@ -109,6 +136,13 @@ try { if (listeners.load) listeners.load(); } catch (e) { console.error('FATAL: 
 
 const G = sandbox.__game;
 check('internals exposed (update/State/Missions)', !!(G && G.update && G.State && G.Missions));
+
+// scenery-height O(1) shortcut must match the exact nearestPathInfo scan (objects sit put)
+try {
+  G.setSeason('summer'); G.startGame();   // build a path to sample
+  const err = G.heightEquivMaxErr();
+  check(`heightFromPath matches heightAt (max err ${err.toFixed(3)}m < 0.5m)`, err < 0.5);
+} catch (e) { check('height-equivalence check ran', false); console.error(e.stack || e); }
 
 const SEASONS = ['summer', 'spring', 'winter', 'monsoon', 'desert'];
 const VEHS = ['car', 'bike', 'truck'];
@@ -177,6 +211,25 @@ try {
   check('timetrial: ghost replay runs without throwing', !threw2 && Number.isFinite(G.State.carX));
   if (threw2) console.error(threw2.stack || threw2);
 } catch (e) { check('timetrial: ran without throwing', false); console.error(e.stack || e); }
+
+// Analog touch input — driving via State.touchSteer/touchThrottle (the mobile joystick path)
+try {
+  G.setVehicle('car'); G.setSeason('summer'); G.setMode('zen'); G.startGame();
+  const k = G.keys; const S = G.State; resetKeys(k); S.autodrive = false;
+  let threw = null, maxKmh = 0, headingStart = S.heading;
+  for (let i = 0; i < 400 && !threw; i++) {
+    S.touchThrottle = 0.9;                       // analog gas
+    S.touchSteer = (i > 150) ? -0.7 : 0;         // analog steer after a bit
+    if (i > 150) { k.left = false; k.right = true; } // joystick would set these too
+    k.up = true;
+    try { G.update(1 / 60); } catch (e) { threw = e; }
+    maxKmh = Math.max(maxKmh, Math.abs(S.speed) * 3.6);
+  }
+  check('analog: throttle/steer drive the car without throwing', !threw && Number.isFinite(S.carX));
+  check(`analog: car accelerated via touchThrottle (${maxKmh.toFixed(0)} km/h)`, maxKmh > 40);
+  check('analog: car turned via touchSteer', Math.abs(S.heading - headingStart) > 0.2);
+  if (threw) console.error(threw.stack || threw);
+} catch (e) { check('analog: ran without throwing', false); console.error(e.stack || e); }
 
 // Practice — tutorial should advance through its steps as inputs are performed
 try {

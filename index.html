@@ -77,9 +77,13 @@
   #missions #m-count { font-size: 13px; font-weight: 700; color: #aee0cc; }
   #m-list { list-style: none; display: flex; flex-direction: column; gap: 3px; }
   #m-list li {
+    position: relative; padding-bottom: 3px;
     display: flex; align-items: center; gap: 7px; font-size: 10.5px; line-height: 1.2;
     opacity: 0.7; transition: opacity 0.3s ease, color 0.3s ease;
   }
+  #m-list li .pbar { position: absolute; left: 20px; right: 0; bottom: 0; height: 2px; border-radius: 2px; background: rgba(255,255,255,0.13); overflow: hidden; }
+  #m-list li .pbar i { display: block; height: 100%; width: 0%; background: #aeccff; transition: width 0.25s ease; }
+  #m-list li.done .pbar i { width: 100% !important; background: #aee0cc; }
   #m-list li .box {
     flex: 0 0 13px; width: 13px; height: 13px; border-radius: 4px;
     border: 1.5px solid rgba(255,255,255,0.32); display: flex; align-items: center; justify-content: center;
@@ -235,6 +239,22 @@
   }
   .tbtn:active { background: rgba(174,224,204,0.4); transform: scale(0.94); }
   .tbtn-go { width: 86px; height: 86px; background: rgba(174,224,204,0.35); font-size: 30px; }
+  /* analog pads: a base circle with a draggable knob */
+  .t-pad {
+    position: absolute; bottom: 26px; pointer-events: auto; touch-action: none;
+    width: 132px; height: 132px; border-radius: 50%;
+    background: rgba(24,28,36,0.42); border: 1.5px solid rgba(255,255,255,0.22);
+    backdrop-filter: blur(8px); box-shadow: 0 6px 18px rgba(0,0,0,0.2);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .t-pad.t-left { left: 26px; }
+  #t-thr { position: relative; bottom: auto; }
+  .t-knob {
+    position: absolute; width: 58px; height: 58px; border-radius: 50%;
+    background: rgba(174,224,204,0.55); border: 1.5px solid rgba(255,255,255,0.4);
+    transition: transform 0.05s linear;
+  }
+  .t-hint { font-size: 10px; letter-spacing: 1px; opacity: 0.55; color: #f4f6fb; text-align: center; pointer-events: none; }
 
   #loader {
     position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
@@ -286,7 +306,7 @@
     <div id="help" class="panel">
       <div><kbd>↑</kbd> accelerate &nbsp; <kbd>↓</kbd> reverse</div>
       <div><kbd>←</kbd> <kbd>→</kbd> steer &nbsp; <kbd>Space</kbd> brake &nbsp; <kbd>Shift</kbd> drift (hold to slide — earns coins)</div>
-      <div><kbd>C</kbd> camera &nbsp; <kbd>F</kbd> autodrive &nbsp; <kbd>N</kbd> minimap &nbsp; <kbd>M</kbd> mute &nbsp; <kbd>P</kbd> pause</div>
+      <div><kbd>C</kbd> camera &nbsp; <kbd>F</kbd> autodrive &nbsp; <kbd>N</kbd> minimap &nbsp; <kbd>K</kbd> music &nbsp; <kbd>M</kbd> mute &nbsp; <kbd>P</kbd> pause</div>
       <div>🎮 Gamepad: stick steer · RT accel · LT reverse · A brake · RB drift</div>
     </div>
   </div>
@@ -311,14 +331,12 @@
 
   <!-- On-screen touch controls (shown on touch devices) -->
   <div id="touch">
-    <div class="t-cluster t-left">
-      <button class="tbtn" data-k="left">‹</button>
-      <button class="tbtn" data-k="right">›</button>
-    </div>
+    <!-- analog steering joystick (drag left/right) -->
+    <div id="t-joy" class="t-pad t-left"><div class="t-knob" id="t-joy-knob"></div><span class="t-hint">steer</span></div>
+    <!-- analog throttle pad (drag up = accelerate, down = reverse) + brake -->
     <div class="t-cluster t-right">
       <button class="tbtn" data-k="brake">⊘</button>
-      <button class="tbtn" data-k="down">▾</button>
-      <button class="tbtn tbtn-go" data-k="up">▲</button>
+      <div id="t-thr" class="t-pad"><div class="t-knob" id="t-thr-knob"></div><span class="t-hint">gas ▲<br>rev ▾</span></div>
     </div>
   </div>
 
@@ -337,6 +355,9 @@
 
       <div class="group-title">Choose a season</div>
       <div class="choices seasons" id="season-choices"></div>
+
+      <div class="group-title">Paint / Livery</div>
+      <div class="choices" id="livery-choices" style="gap:8px;flex-wrap:wrap;justify-content:center;"></div>
 
       <div class="group-title">Settings</div>
       <div id="settings-row">
@@ -369,6 +390,17 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="lib/GLTFLoader.js"></script>
+  <!-- Post-processing (FXAA + bloom). Order matters: CopyShader first; EffectComposer defines
+       THREE.Pass + FullScreenQuad; the passes below extend THREE.Pass. All optional — game.js
+       falls back to direct rendering if any are missing. -->
+  <script src="lib/shaders/CopyShader.js"></script>
+  <script src="lib/postprocessing/EffectComposer.js"></script>
+  <script src="lib/postprocessing/ShaderPass.js"></script>
+  <script src="lib/postprocessing/MaskPass.js"></script>
+  <script src="lib/postprocessing/RenderPass.js"></script>
+  <script src="lib/shaders/FXAAShader.js"></script>
+  <script src="lib/shaders/LuminosityHighPassShader.js"></script>
+  <script src="lib/postprocessing/UnrealBloomPass.js"></script>
   <script src="game.js"></script>
 </body>
 </html>

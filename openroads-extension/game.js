@@ -122,7 +122,29 @@ function loadVehicleModel() {
     // we add roll on top without disturbing its mount orientation.
     glbWheels = wheels.map(w => ({ node: w, baseX: w.rotation.x }));
     vehicleGroup.add(model);
+    applyLivery();             // recolour the loaded model's body to the chosen paint
   }, undefined, () => { /* missing/failed → keep procedural fallback */ });
+}
+
+// Recolour the vehicle's body to the selected livery. Picks the largest non-wheel,
+// non-outline mesh (the body panel) so it works for both procedural and GLB vehicles.
+function applyLivery() {
+  const liv = LIVERIES.find(l => l.id === Progress.livery);
+  if (!liv || liv.color == null || !vehicleGroup || typeof vehicleGroup.traverse !== 'function') return;
+  let best = null, bestVol = -1;
+  vehicleGroup.traverse(o => {
+    if (!o.isMesh || !o.geometry) return;
+    const nm = (o.name || '').toLowerCase();
+    if (/wheel|tyre|tire/.test(nm)) return;
+    if (o.material && o.material.side === THREE.BackSide) return;     // skip the ink outline shell
+    if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    const bb = o.geometry.boundingBox; if (!bb) return;
+    const s = new THREE.Vector3(); bb.getSize(s);
+    const sc = o.scale ? Math.abs(o.scale.x * o.scale.y * o.scale.z) : 1;
+    const vol = s.x * s.y * s.z * sc;
+    if (vol > bestVol) { bestVol = vol; best = o; }
+  });
+  if (best && best.material && best.material.color) best.material.color.setHex(liv.color);
 }
 
 // A box with rounded long edges + slightly bevelled ends — the core of every body panel.
@@ -197,17 +219,19 @@ const SEASONS = {
 // ---------------------------------------------------------------------------
 // Missions — 10 tasks to clear the run
 // ---------------------------------------------------------------------------
+// Ordered as an easy → hard ramp: warm-up speed, a gentle smash, then sustained
+// control, precision, navigation, and finally the high-skill speed/air/braking feats.
 const MISSIONS = [
   { id: 'speed80',  label: 'Reach 80 km/h',                    short: '80' },
-  { id: 'hold70',   label: 'Hold 70+ km/h for 8s',            short: '8s', hasProgress: true },
-  { id: 'speed120', label: 'Hit 120 km/h',                    short: '120' },
   { id: 'tree',     label: 'Go off-road & smash a big tree',  short: '🌳' },
-  { id: 'hut',      label: 'Go off-road & flatten a hut',     short: '🛖' },
-  { id: 'pond',     label: 'Cross an off-road pond',          short: '💧', hasProgress: true },
-  { id: 'jump',     label: 'Big air: clear a hill ramp',      short: '⛰️' },
+  { id: 'hold70',   label: 'Hold 70+ km/h for 8s',            short: '8s', hasProgress: true },
+  { id: 'reverse',  label: 'Reverse 40 metres',               short: '40m', hasProgress: true },
   { id: 'cones',    label: 'Bowl down a full set of cones',   short: '🚧', hasProgress: true },
-  { id: 'stop',     label: 'Emergency stop from 80+ (Space)', short: '🛑' },
-  { id: 'reverse',  label: 'Reverse 40 metres',               short: '40m', hasProgress: true }
+  { id: 'pond',     label: 'Cross an off-road pond',          short: '💧', hasProgress: true },
+  { id: 'hut',      label: 'Go off-road & flatten a hut',     short: '🛖' },
+  { id: 'speed120', label: 'Hit 120 km/h',                    short: '120' },
+  { id: 'jump',     label: 'Big air: clear a hill ramp',      short: '⛰️' },
+  { id: 'stop',     label: 'Emergency stop from 80+ (Space)', short: '🛑' }
 ];
 
 const Missions = {
@@ -278,6 +302,8 @@ const State = {
   driftDist: 0,      // metres of sustained drift this run (rewards coins)
   _driftReward: 0,   // last drift milestone already paid out (metres)
   minimap: true,     // minimap visible (toggle N)
+  touchSteer: null,  // analog steer from the mobile joystick (-1..1), null when not touching
+  touchThrottle: null, // analog throttle from the mobile pad (-1 reverse .. 1 accel)
   // time-trial state
   ttFinished: false, ttSampleT: 0,
   // tutorial state
@@ -299,7 +325,8 @@ const keys = { up: false, down: false, left: false, right: false, brake: false, 
 // Persisted user settings (volume + graphics quality)
 const Settings = {
   volume: (() => { const v = parseFloat(lsGet('openroads_vol', '')); return isNaN(v) ? 0.9 : Math.max(0, Math.min(1, v)); })(),
-  quality: (() => { const q = lsGet('openroads_quality', 'med'); return ['low', 'med', 'high'].includes(q) ? q : 'med'; })()
+  quality: (() => { const q = lsGet('openroads_quality', 'med'); return ['low', 'med', 'high'].includes(q) ? q : 'med'; })(),
+  musicOn: lsGet('openroads_music', '1') !== '0'
 };
 function setVolume(v) {
   Settings.volume = Math.max(0, Math.min(1, v));
@@ -321,6 +348,7 @@ function applyQuality() {
       if (sunLight.shadow.map) { sunLight.shadow.map.dispose(); sunLight.shadow.map = null; }
     }
   }
+  setupPost();   // rebuild the post pipeline for this quality (FXAA/bloom gating)
 }
 function setQuality(q) {
   Settings.quality = q;
@@ -328,17 +356,39 @@ function setQuality(q) {
   applyQuality();
 }
 
-// Progression: earn coins by driving/smashing/missions; spend them to unlock vehicles.
+// Cosmetic paint jobs — recolour the vehicle body. 'stock' keeps the model's own colour.
+const LIVERIES = [
+  { id: 'stock',    name: 'Stock',    color: null,     cost: 0 },
+  { id: 'crimson',  name: 'Crimson',  color: 0xc0392f, cost: 0 },
+  { id: 'midnight', name: 'Midnight', color: 0x1b2433, cost: 150 },
+  { id: 'sunburst', name: 'Sunburst', color: 0xe8a13a, cost: 150 },
+  { id: 'forest',   name: 'Forest',   color: 0x2f6b40, cost: 300 },
+  { id: 'violet',   name: 'Violet',   color: 0x6a4fb0, cost: 300 },
+  { id: 'pearl',    name: 'Pearl',    color: 0xe7ebf0, cost: 500 }
+];
+
+// Progression: earn coins by driving/smashing/missions; spend them to unlock vehicles + paint.
 const Progress = {
   coins: parseInt(lsGet('openroads_coins', '0'), 10) || 0,
-  unlocked: (() => { try { return JSON.parse(lsGet('openroads_unlocked', '{}')) || {}; } catch (e) { return {}; } })()
+  unlocked: (() => { try { return JSON.parse(lsGet('openroads_unlocked', '{}')) || {}; } catch (e) { return {}; } })(),
+  liveries: (() => { try { return JSON.parse(lsGet('openroads_liveries', '{}')) || {}; } catch (e) { return {}; } })(),
+  livery: lsGet('openroads_livery', 'stock')
 };
 const UNLOCK_COST = { bike: 400, truck: 1200 };   // car is free
 function isUnlocked(v) { return v === 'car' || !!Progress.unlocked[v]; }
+function liveryUnlocked(id) { const l = LIVERIES.find(x => x.id === id); return !!l && (l.cost === 0 || !!Progress.liveries[id]); }
+function tryUnlockLivery(id) {
+  if (liveryUnlocked(id)) return true;
+  const l = LIVERIES.find(x => x.id === id); if (!l) return false;
+  if (Progress.coins >= l.cost) { Progress.coins -= l.cost; Progress.liveries[id] = true; saveProgress(); return true; }
+  return false;
+}
 function addCoins(n) { Progress.coins += n; }
 function saveProgress() {
   lsSet('openroads_coins', Math.floor(Progress.coins));
   lsSet('openroads_unlocked', JSON.stringify(Progress.unlocked));
+  lsSet('openroads_liveries', JSON.stringify(Progress.liveries));
+  lsSet('openroads_livery', Progress.livery);
 }
 function tryUnlock(v) {
   if (isUnlocked(v)) return true;
@@ -351,6 +401,42 @@ function tryUnlock(v) {
 // Three.js setup
 // ---------------------------------------------------------------------------
 let scene, camera, renderer, clock;
+// Post-processing pipeline (optional — built only if the example libs loaded)
+let composer = null, bloomPass = null, fxaaPass = null, postReady = false;
+function postAvailable() {
+  return typeof THREE.EffectComposer === 'function' && typeof THREE.RenderPass === 'function' &&
+         typeof THREE.ShaderPass === 'function' && !!THREE.FXAAShader;
+}
+// (Re)build the composer for the current quality: low → direct render (fastest);
+// med → FXAA; high → FXAA + a subtle bloom on bright highlights. Safe no-op if libs absent.
+function setupPost() {
+  composer = null; bloomPass = null; fxaaPass = null; postReady = false;
+  if (!renderer || !scene || !camera || !postAvailable()) return;
+  if (Settings.quality === 'low') return;     // skip the extra passes on low-end hardware
+  try {
+    composer = new THREE.EffectComposer(renderer);
+    composer.addPass(new THREE.RenderPass(scene, camera));
+    if (Settings.quality === 'high' && typeof THREE.UnrealBloomPass === 'function') {
+      const sz = new THREE.Vector2(window.innerWidth, window.innerHeight);
+      bloomPass = new THREE.UnrealBloomPass(sz, 0.35, 0.5, 0.85);  // strength, radius, threshold — gentle
+      composer.addPass(bloomPass);
+    }
+    fxaaPass = new THREE.ShaderPass(THREE.FXAAShader);
+    composer.addPass(fxaaPass);
+    resizePost();
+    postReady = true;
+  } catch (e) { composer = null; postReady = false; }   // any failure → direct render fallback
+}
+function resizePost() {
+  if (!composer) return;
+  const dpr = renderer.getPixelRatio ? renderer.getPixelRatio() : 1;
+  if (composer.setPixelRatio) composer.setPixelRatio(dpr);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  if (fxaaPass && fxaaPass.material && fxaaPass.material.uniforms.resolution) {
+    fxaaPass.material.uniforms.resolution.value.set(1 / (window.innerWidth * dpr), 1 / (window.innerHeight * dpr));
+  }
+  if (bloomPass && bloomPass.setSize) bloomPass.setSize(window.innerWidth, window.innerHeight);
+}
 let sunLight, ambLight, hemiLight;
 let vehicleGroup, vehicleWheels = [];
 let glbWheels = [];   // wheel nodes detected inside a loaded GLB model (spun in update)
@@ -473,6 +559,14 @@ function heightAt(x, z) {
   let k = info.d <= corridor ? 0 : (info.d >= corridor + blend ? 1 : (info.d - corridor) / blend);
   return info.y + bumpAt(x, z) * k;
 }
+// O(1) ground height for a point whose centerline elevation (yc) and perpendicular
+// lateral distance are already known — e.g. pooled scenery placed at a fixed offset.
+// Avoids heightAt's full O(path-node) nearestPathInfo scan on the per-frame hot path.
+function heightFromPath(yc, lateralDist, x, z) {
+  const corridor = ROAD_WIDTH / 2 + 3, blend = 24;
+  const k = lateralDist <= corridor ? 0 : (lateralDist >= corridor + blend ? 1 : (lateralDist - corridor) / blend);
+  return yc + bumpAt(x, z) * k;
+}
 
 function initThree() {
   scene = new THREE.Scene();
@@ -522,6 +616,7 @@ function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  resizePost();
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,7 +1277,9 @@ function placeProp(o) {
   const wx = sp.x + sp.nx * o.lane;
   const wz = sp.z + sp.nz * o.lane;
   const onRoad = o.type === 'cones';
-  const wy = onRoad ? sp.y : heightAt(wx, wz);
+  // |o.lane| is the perpendicular distance from the centerline at o.s; reuse it instead
+  // of a full nearestPathInfo scan (placeProp runs every frame for each prop).
+  const wy = onRoad ? sp.y : heightFromPath(sp.y, Math.abs(o.lane), wx, wz);
   o.mesh.position.set(wx, wy, wz);
   o.head = Math.atan2(sp.hx, sp.hz);
   o.mesh.rotation.y = o.head;
@@ -1418,8 +1515,9 @@ function buildVehicle() {
   else if (selectedVehicle === 'bike') buildChopper();
   else buildBigRig();
 
+  applyLivery();               // tint the procedural body before the ink outline is cloned
   addVehicleOutline();
-  loadVehicleModel();          // swap in a real GLB if one is bundled for this vehicle
+  loadVehicleModel();          // swap in a real GLB if one is bundled (re-applies livery on load)
 
   vehicleGroup.position.set(0, 0, 0);
   scene.add(vehicleGroup);
@@ -1609,7 +1707,9 @@ function updateScenery(dt) {
     const wx = sp.x + sp.nx * o.side * o.off;
     const wz = sp.z + sp.nz * o.side * o.off;
     o.wx = wx; o.wz = wz;                 // cache for collision resolution
-    const wy = onRoadKind(o.kind) ? sp.y : heightAt(wx, wz);
+    // o.off is the perpendicular lateral distance from the centerline at o.s, and sp.y is
+    // that centerline's elevation — so we can skip the full nearestPathInfo scan here.
+    const wy = onRoadKind(o.kind) ? sp.y : heightFromPath(sp.y, o.off, wx, wz);
     if (o.broken) {                       // smashed: topple over + sink, then settle
       o.breakT += dt || 0.016;
       const k = Math.min(1, o.breakT * 3.5);
@@ -1673,6 +1773,8 @@ function update(dt) {
   const autoOn = State.autodrive;
 
   // --- throttle / brake / reverse ---
+  // analog mobile pad scales torque by how far it's pushed; keyboard/gamepad = full (1)
+  const thrScale = State.touchThrottle != null ? Math.min(1, Math.abs(State.touchThrottle)) : 1;
   // engine torque tapers as you approach top speed (feels punchy off the line)
   if (keys.brake) {
     const dec = V.brake || 60; // per-vehicle stopping power (bike bites hardest, rig least)
@@ -1685,13 +1787,13 @@ function update(dt) {
     State.launchT = Math.min(0.35, State.launchT + dt);
     const launch = 1 - State.launchT / 0.35;                 // 1 → 0 over the first 0.35s
     const taper = (0.6 - 0.45 * launch) * Math.max(0, State.speed) / maxMs;
-    const torque = V.accel * (1 - taper);
+    const torque = V.accel * (1 - taper) * thrScale;
     State.speed += torque * dt;
   } else if (keys.down) {
     State.launchT = 0;
     // brake first if moving forward, otherwise accelerate in reverse (now punchier)
-    if (State.speed > 0.5) State.speed -= V.accel * 1.3 * dt;
-    else State.speed -= V.accel * 0.75 * dt;
+    if (State.speed > 0.5) State.speed -= V.accel * 1.3 * thrScale * dt;
+    else State.speed -= V.accel * 0.75 * thrScale * dt;
   } else if (autoOn && !userThrottle) {
     // ease toward a relaxed cruise (~62% of top speed)
     const cruise = maxMs * 0.62;
@@ -1718,8 +1820,9 @@ function update(dt) {
     State.heading += dAng * Math.min(1, dt * 1.3);
     State.steer += (0 - State.steer) * Math.min(1, dt * 6);
   } else {
-    const steerInput = (keys.left ? 1 : 0) - (keys.right ? 1 : 0);
-    const returnRate = steerInput === 0 ? 9 : 7;
+    // analog joystick steers proportionally; keyboard/gamepad fall back to ±1
+    const steerInput = State.touchSteer != null ? State.touchSteer : ((keys.left ? 1 : 0) - (keys.right ? 1 : 0));
+    const returnRate = Math.abs(steerInput) < 0.01 ? 9 : 7;
     State.steer += (steerInput - State.steer) * Math.min(1, dt * returnRate);
     // Authority reaches full by ~3.5 m/s instead of 7 (tight turns/donuts come alive once
     // rolling) but is still 0 at a true standstill (no tank-pivot). High-speed bleed is
@@ -1940,21 +2043,25 @@ function renderMissionList() {
     li.className = (done ? 'done' : '') + (firstOpen && m.id === firstOpen.id ? ' active-m' : '');
     li.dataset.id = m.id;
     li.innerHTML = `<span class="box">${done ? '✓' : ''}</span><span class="txt">${m.label}</span>` +
-      (m.hasProgress ? `<span class="prog" data-prog="${m.id}"></span>` : '');
+      (m.hasProgress ? `<span class="prog" data-prog="${m.id}"></span><span class="pbar"><i data-bar="${m.id}"></i></span>` : '');
     list.appendChild(li);
   });
   document.getElementById('m-count').textContent = Missions.count + ' / ' + MISSIONS.length;
 }
 
+function setMissionProg(id, frac, text) {
+  if (Missions.done[id]) return;
+  const t = document.querySelector('[data-prog="' + id + '"]');
+  if (t) t.textContent = text;
+  const bar = document.querySelector('[data-bar="' + id + '"]');
+  if (bar) bar.style.width = Math.max(0, Math.min(100, frac * 100)).toFixed(0) + '%';
+}
 function updateMissionProgress() {
-  const h = document.querySelector('[data-prog="hold70"]');
-  if (h && !Missions.done.hold70) h.textContent = Math.min(8, State.hold70).toFixed(1) + 's';
-  const r = document.querySelector('[data-prog="reverse"]');
-  if (r && !Missions.done.reverse) r.textContent = Math.min(40, State.reverseDist).toFixed(0) + 'm';
-  const p = document.querySelector('[data-prog="pond"]');
-  if (p && !Missions.done.pond) p.textContent = Math.min(100, Math.round(State.pondTime / 1.1 * 100)) + '%';
-  const c = document.querySelector('[data-prog="cones"]');
-  if (c && !Missions.done.cones) c.textContent = (window.__coneProg || '0/6');
+  setMissionProg('hold70', State.hold70 / 8, Math.min(8, State.hold70).toFixed(1) + 's');
+  setMissionProg('reverse', State.reverseDist / 40, Math.min(40, State.reverseDist).toFixed(0) + 'm');
+  setMissionProg('pond', State.pondTime / 1.1, Math.min(100, Math.round(State.pondTime / 1.1 * 100)) + '%');
+  const cp = (window.__coneProg || '0/6').split('/');
+  setMissionProg('cones', (parseInt(cp[0], 10) || 0) / (parseInt(cp[1], 10) || 6), window.__coneProg || '0/6');
 }
 
 let toastTimer = null;
@@ -2276,8 +2383,49 @@ function initAudio() {
   Audio.tyreSrc.start();
 
   buildAmbient();
+  buildMusic();        // generative ambient soundtrack (no assets)
   loadSounds();        // async-load CC0 samples; sampled engine swaps in when ready
   Audio.started = true;
+}
+
+// Generative soundtrack: a slow triangle-wave pad through a soft lowpass, retuned through
+// a gentle vi–IV–I–V chord loop. Fully synthesised (no audio files), mixes under the engine
+// via masterGain (so master volume + mute + the limiter all apply).
+const MUSIC_CHORDS = [
+  [110.0, 261.6, 329.6],   // Am
+  [87.31, 220.0, 261.6],   // F
+  [130.8, 329.6, 392.0],   // C
+  [98.00, 246.9, 293.7]    // G
+];
+function buildMusic() {
+  const ctx = Audio.ctx; if (!ctx) return;
+  Audio.musicFilter = ctx.createBiquadFilter();
+  Audio.musicFilter.type = 'lowpass'; Audio.musicFilter.frequency.value = 950; Audio.musicFilter.Q.value = 0.4;
+  Audio.musicGain = ctx.createGain(); Audio.musicGain.gain.value = 0;
+  Audio.musicFilter.connect(Audio.musicGain); Audio.musicGain.connect(Audio.masterGain);
+  Audio.musicVoices = [0, 1, 2].map((i) => {
+    const o = ctx.createOscillator(); o.type = i === 0 ? 'sine' : 'triangle';
+    o.frequency.value = MUSIC_CHORDS[0][i]; o.detune.value = (i - 1) * 4;
+    const g = ctx.createGain(); g.gain.value = i === 0 ? 0.5 : 0.34;
+    o.connect(g); g.connect(Audio.musicFilter); o.start();
+    return { o, g };
+  });
+  Audio.musicT = 0; Audio.musicChord = 0;
+}
+function updateMusic(dt, t) {
+  if (!Audio.musicVoices) return;
+  const BAR = 6;                                   // seconds per chord
+  Audio.musicT += dt;
+  if (Audio.musicT >= BAR) {
+    Audio.musicT -= BAR;
+    Audio.musicChord = (Audio.musicChord + 1) % MUSIC_CHORDS.length;
+    const ch = MUSIC_CHORDS[Audio.musicChord];
+    Audio.musicVoices.forEach((v, i) => v.o.frequency.setTargetAtTime(ch[i % ch.length], t, 0.9));
+  }
+  // slow breathing swell; duck a touch at speed so it never competes with the engine
+  const speedDuck = 1 - 0.4 * Math.min(1, Math.abs(State.speed) / 40);
+  const level = Settings.musicOn ? (0.07 + 0.025 * Math.sin(t * 0.25)) * speedDuck : 0;
+  Audio.musicGain.gain.setTargetAtTime(level, t, 0.6);
 }
 
 function buildAmbient() {
@@ -2372,6 +2520,8 @@ function updateAudio(dt, maxMs) {
     const p = Math.max(-1, Math.min(1, State.steer * 0.5 + (State.vx * Math.cos(State.heading) - State.vz * Math.sin(State.heading)) * 0.03));
     Audio.pan.pan.setTargetAtTime(p, t, 0.1);
   }
+
+  updateMusic(dt, t);
 
   // skid sample on hard braking OR while drifting (tyres screech)
   if (Audio.skidCD > 0) Audio.skidCD -= dt;
@@ -2556,7 +2706,7 @@ function animate() {
     // idle: still spin slight ambient
     updateParticles(dt);
   }
-  renderer.render(scene, camera);
+  if (postReady && composer) composer.render(); else renderer.render(scene, camera);
 }
 
 // ---------------------------------------------------------------------------
@@ -2581,6 +2731,10 @@ function bindInput() {
           showToast(State.autodrive ? '🌿 Autodrive ON' : 'Autodrive OFF', 'Press F to toggle');
         } break;
       case 'KeyM': setMuted(!State.muted); break;
+      case 'KeyK': {
+        Settings.musicOn = !Settings.musicOn; lsSet('openroads_music', Settings.musicOn ? '1' : '0');
+        showToast(Settings.musicOn ? '🎵 Music on' : '🎵 Music off', 'Press K to toggle');
+      } break;
       case 'KeyN': if (State.running) {
           State.minimap = !State.minimap;
           const nav = (State.mode === 'challenge' || State.mode === 'timetrial');
@@ -2667,6 +2821,53 @@ function setupTouch() {
     btn.addEventListener('mouseup', release);
     btn.addEventListener('mouseleave', release);
   });
+  setupAnalogPad('t-joy', 'horizontal');    // steering joystick
+  setupAnalogPad('t-thr', 'vertical');      // throttle / reverse pad
+}
+
+// A draggable analog pad: horizontal drives State.touchSteer, vertical drives
+// State.touchThrottle. It also sets the matching binary `keys` so all the existing
+// keys-based logic (audio load, autodrive override, mission detection) keeps working.
+function setupAnalogPad(id, axis) {
+  const pad = document.getElementById(id);
+  if (!pad) return;
+  const knob = pad.querySelector('.t-knob');
+  let active = null;                       // active touch identifier (or 'mouse')
+  const reset = () => {
+    active = null;
+    if (knob) knob.style.transform = 'translate(0,0)';
+    if (axis === 'horizontal') { State.touchSteer = null; keys.left = keys.right = false; }
+    else { State.touchThrottle = null; keys.up = keys.down = false; }
+  };
+  const apply = (clientX, clientY) => {
+    const r = pad.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const rad = r.width / 2;
+    if (axis === 'horizontal') {
+      const v = Math.max(-1, Math.min(1, (clientX - cx) / rad));
+      State.touchSteer = -v;               // drag right → turn right (matches keyboard sign)
+      keys.left = v < -0.15; keys.right = v > 0.15;
+      if (knob) knob.style.transform = 'translate(' + (v * rad * 0.55).toFixed(0) + 'px,0)';
+    } else {
+      const v = Math.max(-1, Math.min(1, -(clientY - cy) / rad));   // up = accelerate
+      State.touchThrottle = v;
+      keys.up = v > 0.15; keys.down = v < -0.15;
+      if (knob) knob.style.transform = 'translate(0,' + (-v * rad * 0.55).toFixed(0) + 'px)';
+    }
+    if (Audio.ctx && Audio.ctx.state === 'suspended' && !State.paused) Audio.ctx.resume();
+  };
+  pad.addEventListener('touchstart', (e) => { e.preventDefault(); const t = e.changedTouches[0]; active = t.identifier; apply(t.clientX, t.clientY); }, { passive: false });
+  pad.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) if (t.identifier === active) { apply(t.clientX, t.clientY); break; }
+  }, { passive: false });
+  const endTouch = (e) => { for (const t of e.changedTouches) if (t.identifier === active) { reset(); break; } };
+  pad.addEventListener('touchend', endTouch, { passive: false });
+  pad.addEventListener('touchcancel', endTouch, { passive: false });
+  // mouse fallback (desktop testing)
+  pad.addEventListener('mousedown', (e) => { e.preventDefault(); active = 'mouse'; apply(e.clientX, e.clientY); });
+  window.addEventListener('mousemove', (e) => { if (active === 'mouse') apply(e.clientX, e.clientY); });
+  window.addEventListener('mouseup', () => { if (active === 'mouse') reset(); });
 }
 
 function togglePause() {
@@ -2703,6 +2904,18 @@ function refreshMenu() {
     el.className = 'choice' + (key === selectedVehicle ? ' active' : '') + (locked ? ' locked' : '');
     el.innerHTML = `<div class="icon">${v.icon}</div><div class="name">${v.name}</div>` +
       (locked ? `<div class="lock">🔒 ${UNLOCK_COST[key]} coins</div>` : `<div class="desc">${v.desc}</div>`);
+  });
+  const lc = document.getElementById('livery-choices');
+  if (lc) lc.querySelectorAll('.choice').forEach(el => {
+    const liv = LIVERIES.find(l => l.id === el.dataset.key); if (!liv) return;
+    const locked = !liveryUnlocked(liv.id), sel = Progress.livery === liv.id;
+    el.className = 'choice livery' + (sel ? ' active' : '') + (locked ? ' locked' : '');
+    const sw = liv.color == null
+      ? 'background:repeating-linear-gradient(45deg,#888,#888 4px,#aaa 4px,#aaa 8px)'
+      : 'background:#' + new THREE.Color(liv.color).getHexString();
+    el.innerHTML = `<div class="swatch" style="${sw};height:18px;border-radius:6px;margin-bottom:5px;"></div>` +
+      `<div class="name">${liv.name}</div>` +
+      (locked ? `<div class="lock">🔒 ${liv.cost}</div>` : '');
   });
   const cb = document.getElementById('coin-bal-n'); if (cb) cb.textContent = Math.floor(Progress.coins);
 }
@@ -2757,6 +2970,28 @@ function buildMenu() {
     });
     sc.appendChild(el);
   });
+
+  // livery / paint chips
+  const lc = document.getElementById('livery-choices');
+  if (lc) {
+    LIVERIES.forEach(liv => {
+      const el = document.createElement('div');
+      el.className = 'choice livery';
+      el.dataset.key = liv.id;
+      el.style.minWidth = '74px'; el.style.padding = '8px 8px';
+      el.addEventListener('click', () => {
+        if (!liveryUnlocked(liv.id)) {
+          if (tryUnlockLivery(liv.id)) { showToast('🎨 ' + liv.name + ' unlocked!', ''); playDing(); }
+          else { showToast('🔒 Need ' + liv.cost + ' coins', 'You have ' + Math.floor(Progress.coins)); refreshMenu(); return; }
+        }
+        Progress.livery = liv.id; saveProgress();
+        if (vehicleGroup && !State.running) { buildVehicle(); }   // live preview on the menu backdrop
+        refreshMenu();
+      });
+      lc.appendChild(el);
+    });
+    refreshMenu();   // paint livery chips now that they exist (initial call ran before this)
+  }
 
   // settings: volume slider + quality chips
   const vol = document.getElementById('vol'), volVal = document.getElementById('vol-val');
@@ -2828,6 +3063,7 @@ function startGame() {
   State.jumpY = 0; State.vy = 0; State.airborne = false;
   State.hold70 = 0; State.pondTime = 0; State.reverseDist = 0;
   State.launchT = 0; State.driftDist = 0; State._driftReward = 0;
+  State.touchSteer = null; State.touchThrottle = null;
   State.wasMoving = false; State.offRoad = false; State.won = false;
   State.ttFinished = false; State.ttSampleT = 0; ghostRec = []; ttMile = 0;
   State.tutStep = -1; State.tutT = 0;
