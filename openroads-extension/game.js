@@ -42,21 +42,40 @@ function toonRamp() {
   _toonRamp = tex;
   return tex;
 }
+// Art style: 'cel' (MeshToonMaterial + banded ramp + ink outlines) or 'flat' (faceted
+// MeshLambertMaterial, flatShading, no outlines) — the bright low-poly polygon look.
+// Chosen in Settings and persisted; every surface flows through surf() so one toggle
+// reskins the whole world.
+function isFlat() { return typeof Settings !== 'undefined' && Settings.artStyle === 'flat'; }
+function surf(color, opts) {
+  opts = opts || {};
+  const o = { color: color, transparent: !!opts.transparent, opacity: opts.opacity == null ? 1 : opts.opacity };
+  if (opts.map) o.map = opts.map;
+  if (isFlat()) {
+    // r128: only Phong/Standard honour flatShading (Lambert shades per-vertex and warns).
+    // Phong with no specular reads as a matte, truly faceted low-poly surface.
+    o.flatShading = true; o.shininess = 0; o.specular = 0x000000;
+    return new THREE.MeshPhongMaterial(o);
+  }
+  o.gradientMap = toonRamp();
+  return new THREE.MeshToonMaterial(o);
+}
 const MAT = {
-  paint:  (c) => new THREE.MeshToonMaterial({ color: c, gradientMap: toonRamp() }),
-  matte:  (c) => new THREE.MeshToonMaterial({ color: c, gradientMap: toonRamp() }),
-  chrome: () => new THREE.MeshToonMaterial({ color: 0xd2d7dd, gradientMap: toonRamp() }),
-  glass:  () => new THREE.MeshToonMaterial({ color: 0x2c3e4c, gradientMap: toonRamp(), transparent: true, opacity: 0.82 }),
-  tire:   () => new THREE.MeshToonMaterial({ color: 0x1b1e23, gradientMap: toonRamp() }),
-  dark:   () => new THREE.MeshToonMaterial({ color: 0x2a2d33, gradientMap: toonRamp() }),
+  paint:  (c) => surf(c),
+  matte:  (c) => surf(c),
+  chrome: () => surf(0xd2d7dd),
+  glass:  () => surf(0x2c3e4c, { transparent: true, opacity: 0.82 }),
+  tire:   () => surf(0x1b1e23),
+  dark:   () => surf(0x2a2d33),
   light:  (c) => new THREE.MeshBasicMaterial({ color: c }),
-  // ground/terrain & scenery want the toon banding too
-  land:   (c) => new THREE.MeshToonMaterial({ color: c, gradientMap: toonRamp() })
+  // ground/terrain & scenery
+  land:   (c) => surf(c)
 };
 
 // Cheap "ink outline" for the hero vehicle: a slightly inflated back-face shell.
 const OUTLINE_INK = 0x1b1d23;
 function addVehicleOutline() {
+  if (isFlat()) return;            // flat low-poly look reads cleaner with no ink outline
   if (!vehicleGroup || typeof vehicleGroup.clone !== 'function') return;
   const shell = vehicleGroup.clone(true);
   const ink = new THREE.MeshBasicMaterial({ color: OUTLINE_INK, side: THREE.BackSide });
@@ -103,10 +122,7 @@ function loadVehicleModel() {
       if (/wheel|tyre|tire/.test(nm)) wheels.push(o);     // spinnable wheel node
       o.castShadow = true; o.receiveShadow = true;
       const m = o.material;
-      o.material = new THREE.MeshToonMaterial({
-        color: (m && m.color) ? m.color.getHex() : 0xcccccc,
-        map: (m && m.map) || null, gradientMap: toonRamp()
-      });
+      o.material = surf((m && m.color) ? m.color.getHex() : 0xcccccc, { map: (m && m.map) || null });
     });
     kill.forEach(o => o.parent && o.parent.remove(o));
     const box = new THREE.Box3().setFromObject(model);
@@ -310,6 +326,7 @@ const State = {
   tutStep: -1, tutT: 0,
   // mission run state
   jumpY: 0, vy: 0, airborne: false,
+  gripMod: 1,        // surface grip multiplier (oil/mud/puddle hazards drop it < 1)
   hold70: 0,         // seconds held >= 70 km/h
   pondTime: 0,       // seconds spent crossing a pond
   reverseDist: 0,    // metres reversed
@@ -326,6 +343,7 @@ const keys = { up: false, down: false, left: false, right: false, brake: false, 
 const Settings = {
   volume: (() => { const v = parseFloat(lsGet('openroads_vol', '')); return isNaN(v) ? 0.9 : Math.max(0, Math.min(1, v)); })(),
   quality: (() => { const q = lsGet('openroads_quality', 'med'); return ['low', 'med', 'high'].includes(q) ? q : 'med'; })(),
+  artStyle: (() => { const a = lsGet('openroads_art', 'cel'); return ['cel', 'flat'].includes(a) ? a : 'cel'; })(),
   musicOn: lsGet('openroads_music', '1') !== '0'
 };
 function setVolume(v) {
@@ -354,6 +372,24 @@ function setQuality(q) {
   Settings.quality = q;
   lsSet('openroads_quality', q);
   applyQuality();
+}
+// Art-style toggle: cel-shaded ↔ flat low-poly. Persisted, applied live (rebuilds the
+// world + vehicle so every material picks up the new style — safe on the menu backdrop).
+function setArtStyle(a) {
+  if (!['cel', 'flat'].includes(a)) return;
+  Settings.artStyle = a;
+  lsSet('openroads_art', a);
+  applyArtStyle();
+}
+function applyArtStyle() {
+  const flat = Settings.artStyle === 'flat';
+  if (document.body) document.body.classList.toggle('flat', flat);
+  if (renderer) {
+    // Flat colours want literal output — ACES desaturates them; toon banding doesn't.
+    renderer.toneMapping = flat ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = flat ? 1.0 : 1.1;
+  }
+  if (scene) { buildWorld(); buildVehicle(); }
 }
 
 // Cosmetic paint jobs — recolour the vehicle body. 'stock' keeps the model's own colour.
@@ -441,6 +477,7 @@ let sunLight, ambLight, hemiLight;
 let vehicleGroup, vehicleWheels = [];
 let glbWheels = [];   // wheel nodes detected inside a loaded GLB model (spun in update)
 let roadGroup, terrainGroup, sceneryPool = [];
+let actorGroup = null, actorPool = [];      // living, moving entities (animals + people)
 let particleSystem = null, particleData = null;
 let rainStreaks = null;
 
@@ -587,6 +624,7 @@ function initThree() {
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.1;
+  if (Settings.artStyle === 'flat') { renderer.toneMapping = THREE.NoToneMapping; renderer.toneMappingExposure = 1.0; }
   document.getElementById('game').appendChild(renderer.domElement);
 
   // Lights
@@ -648,22 +686,47 @@ function buildSky(S) {
 // ---------------------------------------------------------------------------
 // Build world for a season
 // ---------------------------------------------------------------------------
+// Flat low-poly palette: nudge each season's colours brighter/cleaner so faceted
+// surfaces read as punchy solid polygons (vs the muted cel palette). Returns a copy —
+// physics/audio keep reading the untouched SEASONS entry.
+function flatPalette(S) {
+  const bump = (hex, ds, dl) => new THREE.Color(hex).offsetHSL(0, ds, dl).getHex();
+  return Object.assign({}, S, {
+    sky:        bump(S.sky, 0.08, 0.04),
+    fog:        bump(S.fog, 0.04, 0.05),
+    ground:     bump(S.ground, 0.20, -0.04),
+    groundEdge: bump(S.groundEdge, 0.18, -0.05),
+    treeColor:  bump(S.treeColor, 0.18, -0.04),
+    accent:     bump(S.accent, 0.08, 0.02)
+  });
+}
+
 function buildWorld() {
-  const S = SEASONS[selectedSeason];
+  const flat = isFlat();
+  const S = flat ? flatPalette(SEASONS[selectedSeason]) : SEASONS[selectedSeason];
 
   scene.background = new THREE.Color(S.sky);
   scene.fog = new THREE.FogExp2(S.fog, S.fogDensity);
   buildSky(S);
 
-  // Toon shading already supplies the banding, so total light must stay near 1.0 —
-  // otherwise ambient+hemi+sun sum clips colours to white (the washed-out look).
   sunLight.color.setHex(S.sun);
-  sunLight.intensity = S.sunInt * 0.85;
   ambLight.color.setHex(S.amb);
-  ambLight.intensity = S.ambInt * 0.34;
   hemiLight.color.setHex(S.sky);
   hemiLight.groundColor.setHex(S.ground);
-  hemiLight.intensity = (selectedSeason === 'monsoon') ? 0.28 : 0.36;
+  if (flat) {
+    // Flat Lambert + NoToneMapping: keep the additive sun+amb+hemi sum under ~1.0 so bright
+    // greens stay saturated instead of clipping to white, while a clear directional keeps the
+    // facets shaded (lit ~0.9, shadowed ~0.4) — the punchy low-poly read.
+    sunLight.intensity = Math.min(S.sunInt, 1.0) * 0.7;
+    ambLight.intensity = 0.38;
+    hemiLight.intensity = 0.22;
+  } else {
+    // Toon shading already supplies the banding, so total light must stay near 1.0 —
+    // otherwise ambient+hemi+sun sum clips colours to white (the washed-out look).
+    sunLight.intensity = S.sunInt * 0.85;
+    ambLight.intensity = S.ambInt * 0.34;
+    hemiLight.intensity = (selectedSeason === 'monsoon') ? 0.28 : 0.36;
+  }
 
   // --- Procedural terrain grid (follows car) + distant hill ring ---
   if (terrainGroup) scene.remove(terrainGroup);
@@ -678,6 +741,10 @@ function buildWorld() {
 
   // --- Scenery pool (trees / cacti / rocks) ---
   buildScenery(S);
+
+  // --- Living actors (animals + pedestrians) ---
+  buildActors();
+  buildBlood();
 
   // --- Mission interactables ---
   buildInteractables();
@@ -804,7 +871,7 @@ function buildRoad(S) {
   roadGroup = new THREE.Group();
 
   roadTex = makeRoadTexture(S);
-  const mat = new THREE.MeshToonMaterial({ map: roadTex, gradientMap: toonRamp() });
+  const mat = surf(0xffffff, { map: roadTex });
 
   // ribbon of ROAD_ROWS rows × 2 edge columns; vertices are filled per-frame in
   // world space from the path buffer (here we only allocate + index it).
@@ -858,7 +925,7 @@ function buildBridges(S) {
   if (bridgeGroup) scene.remove(bridgeGroup);
   bridgeGroup = new THREE.Group(); scene.add(bridgeGroup);
   bridges = [];
-  const water = () => new THREE.MeshToonMaterial({ color: 0x5fa8d6, gradientMap: toonRamp(), transparent: true, opacity: 0.85 });
+  const water = () => surf(0x5fa8d6, { transparent: true, opacity: 0.85 });
   const stone = MAT.matte(0xb9b3a4), rail = MAT.matte(0xcdd2d8);
   const hw = ROAD_WIDTH / 2;
   for (let i = 0; i < 3; i++) {
@@ -932,6 +999,15 @@ function buildScenery(S) {
   for (let i = 0; i < 3; i++) recipe.push('pizza');
   for (let i = 0; i < 3; i++) recipe.push('watertank');
   for (let i = 0; i < 3; i++) recipe.push('park');
+  // roadside commerce
+  for (let i = 0; i < 9; i++) recipe.push('stall');        // single smashable stall
+  for (let i = 0; i < 3; i++) recipe.push('market');       // a cluster set-piece
+  for (let i = 0; i < 2; i++) recipe.push('fuelstation');
+  // launch ramps + road-surface hazards (grip modifiers)
+  for (let i = 0; i < 5; i++) recipe.push('ramp');
+  for (let i = 0; i < 5; i++) recipe.push('oil');
+  for (let i = 0; i < 6; i++) recipe.push('puddle');
+  for (let i = 0; i < 5; i++) recipe.push('mud');
 
   const N = recipe.length;
   recipe.forEach((kind, i) => {
@@ -951,6 +1027,11 @@ function buildScenery(S) {
     else if (kind === 'building') off = ROAD_WIDTH / 2 + 16 + Math.random() * 16;   // clusters sit well back
     else if (kind === 'pizza' || kind === 'church') off = ROAD_WIDTH / 2 + 9 + Math.random() * 14;
     else if (kind === 'watertank' || kind === 'park') off = ROAD_WIDTH / 2 + 12 + Math.random() * 22;
+    else if (kind === 'stall') off = ROAD_WIDTH / 2 + 2.2 + Math.random() * 2.5;       // right on the verge
+    else if (kind === 'market') off = ROAD_WIDTH / 2 + 7 + Math.random() * 6;          // cluster set back a touch
+    else if (kind === 'fuelstation') off = ROAD_WIDTH / 2 + 8 + Math.random() * 8;
+    else if (kind === 'ramp') off = ROAD_WIDTH / 4 + (Math.random() - 0.5) * 1.0;       // in one lane
+    else if (kind === 'oil' || kind === 'puddle' || kind === 'mud') off = (Math.random() - 0.5) * (ROAD_WIDTH - 3); // anywhere across the road
     else if (kind === 'lake') off = 38 + Math.random() * 45;
     else if (kind === 'field') off = 26 + Math.random() * 55;
     else if (kind === 'rock') off = 12 + Math.random() * 60;
@@ -959,11 +1040,15 @@ function buildScenery(S) {
     // collision radius (0 = pass-through) + whether it shatters when smashed fast
     const CR = { tree: 1.3, rock: 1.4, fence: 1.7, sign: 0.5, barricade: 1.9,
                  haybale: 1.3, crate: 1.0, barrel: 0.8, mailbox: 0.5, bush: 1.1, lake: 0, field: 0,
-                 building: 4, church: 3.5, pizza: 3, watertank: 1.8, park: 0, bridge: 0 };
+                 building: 4, church: 3.5, pizza: 3, watertank: 1.8, park: 0, bridge: 0,
+                 stall: 1.6, market: 4.5, fuelstation: 2.6 };           // ramp/oil/puddle/mud = 0 (drive over)
     const BREAK = { tree: true, fence: true, sign: true, barricade: true,
-                    haybale: true, crate: true, barrel: true, mailbox: true, bush: true };
+                    haybale: true, crate: true, barrel: true, mailbox: true, bush: true, stall: true };
+    // road-surface hazards: radius + grip/drag behaviour applied while the car is over them
+    const HAZ = { oil: 3.0, puddle: 3.2, mud: 3.4, ramp: 2.6 };
     sceneryPool.push({ mesh, kind, side, off, s, spin: Math.random() * Math.PI,
-                       cr: CR[kind] || 0, breakable: !!BREAK[kind], broken: false, breakT: 0 });
+                       cr: CR[kind] || 0, breakable: !!BREAK[kind], broken: false, breakT: 0,
+                       hazard: HAZ[kind] ? kind : null, hr: HAZ[kind] || 0 });
   });
 }
 
@@ -1039,7 +1124,7 @@ function makeScenicProp(kind, S) {
       const base = cityCols[Math.floor(Math.random() * cityCols.length)];
       const cols = tall ? 3 : 4, rows = tall ? 9 : (h < 6 ? 2 : 4);
       const tex = makeFacadeTexture(base, cols, rows);
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshToonMaterial({ map: tex, gradientMap: toonRamp() }));
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), surf(0xffffff, { map: tex }));
       bx += w / 2;
       wall.position.set(bx, h / 2, (Math.random() - 0.5) * 2.5); wall.castShadow = true; g.add(wall);
       // parapet rim + rooftop unit + (towers) antenna
@@ -1108,8 +1193,61 @@ function makeScenicProp(kind, S) {
     });
   } else if (kind === 'lake') {
     const water = new THREE.Mesh(new THREE.CircleGeometry(7 + Math.random() * 5, 22),
-      new THREE.MeshToonMaterial({ color: 0x73b6d6, gradientMap: toonRamp(), transparent: true, opacity: 0.82 }));
+      surf(0x73b6d6, { transparent: true, opacity: 0.82 }));
     water.rotation.x = -Math.PI / 2; water.position.y = 0.06; g.add(water);
+  } else if (kind === 'stall') {
+    // roadside market stall — striped awning, goods on the counter (smashable)
+    const awC = [0xc23030, 0x2f8f4a, 0x2f63b8, 0xe8a13a][Math.floor(Math.random() * 4)];
+    const counter = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.9, 1.1), MAT.matte(0xb5895c));
+    counter.position.y = 0.45; counter.castShadow = true; g.add(counter);
+    const top = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.12, 1.2), MAT.matte(0xd8b483));
+    top.position.y = 0.96; g.add(top);
+    [-1.1, 1.1].forEach(x => { const p = new THREE.Mesh(new THREE.BoxGeometry(0.1, 2.2, 0.1), MAT.matte(0x8a6a44)); p.position.set(x, 1.1, -0.45); g.add(p); });
+    for (let s2 = 0; s2 < 5; s2++) { const st = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.12, 1.4), MAT.matte(s2 % 2 ? 0xf4f1e4 : awC)); st.position.set((s2 - 2) * 0.5, 2.1, 0.05); st.rotation.x = 0.32; st.castShadow = true; g.add(st); }
+    const fc = [0xe8534e, 0xf2c14e, 0x6fae4f];
+    for (let s2 = 0; s2 < 6; s2++) { const f = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 5), MAT.matte(fc[s2 % 3])); f.position.set((Math.random() - 0.5) * 1.9, 1.08, (Math.random() - 0.5) * 0.7); g.add(f); }
+  } else if (kind === 'market') {
+    // a cluster of three stalls in a row + crates — instant village-market set-piece
+    const awC = [0xc23030, 0x2f8f4a, 0x2f63b8];
+    [-3, 0, 3].forEach((zz, si) => {
+      const counter = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.85, 1.0), MAT.matte(0xb5895c));
+      counter.position.set(0, 0.42, zz); counter.castShadow = true; g.add(counter);
+      const awn = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.12, 1.2), MAT.matte(awC[si % 3]));
+      awn.position.set(0, 1.9, zz + 0.1); awn.rotation.x = 0.3; awn.castShadow = true; g.add(awn);
+      [-0.9, 0.9].forEach(x => { const p = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.9, 0.1), MAT.matte(0x8a6a44)); p.position.set(x, 0.95, zz - 0.4); g.add(p); });
+    });
+    for (let c = 0; c < 3; c++) { const cr = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 0.7), MAT.matte(0xb07a44)); cr.position.set(1.5, 0.35, (c - 1) * 2.2); cr.castShadow = true; g.add(cr); }
+  } else if (kind === 'fuelstation') {
+    const canopy = new THREE.Mesh(new THREE.BoxGeometry(5, 0.4, 6), MAT.matte(0xe7ebf0));
+    canopy.position.y = 4; canopy.castShadow = true; g.add(canopy);
+    const band = new THREE.Mesh(new THREE.BoxGeometry(5.05, 0.26, 6.05), MAT.matte(0xc23030)); band.position.y = 3.78; g.add(band);
+    [[-2.2, -2.6], [2.2, -2.6], [-2.2, 2.6], [2.2, 2.6]].forEach(([x, z]) => { const p = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 4, 8), MAT.matte(0x9aa0a6)); p.position.set(x, 2, z); g.add(p); });
+    [-1, 1].forEach(s2 => {
+      const pump = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.5, 0.5), MAT.matte(0xcdd2d8)); pump.position.set(s2 * 1.2, 0.75, 0); pump.castShadow = true; g.add(pump);
+      const scr = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.4, 0.05), MAT.matte(0x2c3e4c)); scr.position.set(s2 * 1.2, 1.1, 0.27); g.add(scr);
+    });
+  } else if (kind === 'ramp') {
+    // launch wedge in one lane — rises along the driving direction (local +z after rotate)
+    const rg = new THREE.Group(); rg.rotation.y = -Math.PI / 2;
+    const shape = new THREE.Shape(); shape.moveTo(0, 0); shape.lineTo(4.6, 0); shape.lineTo(4.6, 1.5); shape.lineTo(0, 0);
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: 4.6, bevelEnabled: false }); geo.translate(0, 0, -2.3);
+    const ramp = new THREE.Mesh(geo, MAT.matte(0x44474f)); ramp.castShadow = true; ramp.receiveShadow = true; rg.add(ramp);
+    const chev = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1.6, 4.4), new THREE.MeshBasicMaterial({ color: 0xf4d23c }));
+    chev.position.set(4.55, 0.78, 0); chev.rotation.z = Math.atan2(1.5, 4.6); rg.add(chev);
+    g.add(rg);
+  } else if (kind === 'oil') {
+    const d = new THREE.Mesh(new THREE.CircleGeometry(2.8, 16), new THREE.MeshBasicMaterial({ color: 0x141418 }));
+    d.rotation.x = -Math.PI / 2; d.position.y = 0.03; d.scale.set(1.2, 1, 0.8); g.add(d);
+    const sheen = new THREE.Mesh(new THREE.CircleGeometry(1.5, 14), new THREE.MeshBasicMaterial({ color: 0x2c2c44 }));
+    sheen.rotation.x = -Math.PI / 2; sheen.position.y = 0.04; g.add(sheen);
+  } else if (kind === 'puddle') {
+    const d = new THREE.Mesh(new THREE.CircleGeometry(3.0, 18), surf(0x6fb4d8, { transparent: true, opacity: 0.68 }));
+    d.rotation.x = -Math.PI / 2; d.position.y = 0.03; d.scale.set(1.3, 1, 0.9); g.add(d);
+  } else if (kind === 'mud') {
+    const d = new THREE.Mesh(new THREE.CircleGeometry(3.2, 16), MAT.matte(0x5a4632));
+    d.rotation.x = -Math.PI / 2; d.position.y = 0.03; d.scale.set(1.2, 1, 0.9); g.add(d);
+    const sp = new THREE.Mesh(new THREE.CircleGeometry(1.8, 14), MAT.matte(0x6e5740));
+    sp.rotation.x = -Math.PI / 2; sp.position.y = 0.04; g.add(sp);
   } else { // field patch — a flat tinted disc that reads as a meadow/crop field
     const tint = new THREE.Color(S.ground).offsetHSL((Math.random() - 0.5) * 0.04, 0.05, (Math.random() - 0.5) * 0.06);
     const patch = new THREE.Mesh(new THREE.CircleGeometry(10 + Math.random() * 8, 18), MAT.matte(tint.getHex()));
@@ -1234,7 +1372,7 @@ function makeProp(type, S) {
     radius = 3.6;
   } else if (type === 'pond') {
     const water = new THREE.Mesh(new THREE.CircleGeometry(6.5, 28),
-      new THREE.MeshToonMaterial({ color: 0x6fb4d8, gradientMap: toonRamp(), transparent: true, opacity: 0.82 }));
+      surf(0x6fb4d8, { transparent: true, opacity: 0.82 }));
     water.rotation.x = -Math.PI / 2; water.position.y = 0.04; g.add(water);
     const rim = new THREE.Mesh(new THREE.RingGeometry(6.5, 7.4, 28),
       MAT.matte(S.groundEdge));
@@ -1694,9 +1832,9 @@ function buildBigRig() {
 // Scenery recycling — placed by (arc-length, side, lateral) and sat on terrain
 // ---------------------------------------------------------------------------
 function updateScenery(dt) {
-  const onRoadKind = (k) => k === 'fence' || k === 'sign' || k === 'barricade' || k === 'bridge';
+  const onRoadKind = (k) => k === 'fence' || k === 'sign' || k === 'barricade' || k === 'bridge' || k === 'ramp' || k === 'oil' || k === 'puddle' || k === 'mud';
   const acrossRoad = (k) => k === 'barricade' || k === 'bridge';
-  const facesRoad = (k) => k === 'fence' || k === 'sign' || k === 'building' || k === 'church' || k === 'pizza' || k === 'watertank' || k === 'park';
+  const facesRoad = (k) => k === 'fence' || k === 'sign' || k === 'building' || k === 'church' || k === 'pizza' || k === 'watertank' || k === 'park' || k === 'stall' || k === 'market' || k === 'fuelstation' || k === 'ramp';
   sceneryPool.forEach(o => {
     if (o.s < State.s - 36) {                 // recycle behind → ahead (respawn intact)
       o.s += SCENERY_SPAN;
@@ -1723,6 +1861,251 @@ function updateScenery(dt) {
     else if (facesRoad(o.kind)) o.mesh.rotation.y = head;            // fence/sign/landmarks line the road
     else o.mesh.rotation.y = o.spin;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Living actors — animals that graze + bolt across the road, and pedestrians that
+// walk the roadside. Unlike scenery (fixed lateral offset), an actor's lateral
+// position `lat` changes over time: that's what makes a deer dash across in front
+// of you. Pooled + recycled ahead exactly like scenery so the world stays alive
+// without unbounded object growth.
+// ---------------------------------------------------------------------------
+const ANIMAL_KINDS = {
+  deer:  { body: 0x9c6b3f, h: 1.3, len: 1.7, legR: 1.0, antler: true,  grazeOff: [8, 18], flee: 11 },
+  cow:   { body: 0xe9e4dc, h: 1.5, len: 2.2, legR: 1.0, horns: true,   grazeOff: [10, 22], flee: 6.5 },
+  sheep: { body: 0xe7e2d6, h: 1.0, len: 1.3, legR: 0.8, wool: true,    grazeOff: [9, 20], flee: 7.5 },
+  dog:   { body: 0x8a6a44, h: 0.8, len: 1.2, legR: 0.7,                grazeOff: [6, 14], flee: 12 }
+};
+function makeAnimal(kind) {
+  const A = ANIMAL_KINDS[kind], g = new THREE.Group();
+  const skin = A.wool ? MAT.matte(A.body) : MAT.matte(A.body);
+  const bodyGeo = A.wool ? new THREE.SphereGeometry(A.h * 0.5, 7, 6) : new THREE.BoxGeometry(A.h * 0.62, A.h * 0.55, A.len);
+  const body = new THREE.Mesh(bodyGeo, skin);
+  body.position.y = A.h * 0.62; body.castShadow = true;
+  if (A.wool) body.scale.set(1.25, 1, 1.5);
+  g.add(body);
+  // head + neck at the front (+Z)
+  const head = new THREE.Mesh(new THREE.BoxGeometry(A.h * 0.42, A.h * 0.42, A.h * 0.5), MAT.matte(A.wool ? 0x33312e : A.body));
+  head.position.set(0, A.h * (kind === 'deer' ? 0.95 : 0.7), A.len * 0.5 + A.h * 0.1);
+  head.castShadow = true; g.add(head);
+  if (A.antler) [-1, 1].forEach(sx => {
+    const an = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.5, 4), MAT.matte(0x6e5638));
+    an.position.set(sx * 0.14, A.h * 1.2, A.len * 0.5); an.rotation.z = sx * 0.4; g.add(an);
+  });
+  if (A.horns) [-1, 1].forEach(sx => {
+    const hn = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.3, 4), MAT.matte(0xcfc6b2));
+    hn.position.set(sx * 0.18, A.h * 0.92, A.len * 0.52); hn.rotation.z = sx * 0.9; g.add(hn);
+  });
+  // 4 legs (front pair / back pair) — stored for the gallop animation
+  const legs = [], lw = A.h * 0.1, lh = A.h * 0.55;
+  [[-1, 1], [1, 1], [-1, -1], [1, -1]].forEach(([sx, sz]) => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(lw, lh, lw), MAT.matte(A.wool ? 0x33312e : 0x5b4630));
+    leg.position.set(sx * A.h * 0.24, lh * 0.5, sz * A.len * 0.32);
+    leg.userData.front = sz > 0; leg.userData.baseY = lh * 0.5; leg.userData.lh = lh;
+    g.add(leg); legs.push(leg);
+  });
+  g.userData.legs = legs;
+  return g;
+}
+const SHIRTS = [0xc0392f, 0x2f63b8, 0x4a8c4a, 0xe8a13a, 0x6a4fb0, 0xd23f7a, 0x3aa6a0];
+function makePerson() {
+  const g = new THREE.Group();
+  const skin = 0xe0b48c, shirt = SHIRTS[Math.floor(Math.random() * SHIRTS.length)], pants = 0x394b63;
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.6, 0.26), MAT.matte(shirt));
+  torso.position.y = 1.15; torso.castShadow = true; g.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 7, 6), MAT.matte(skin));
+  head.position.y = 1.62; head.castShadow = true; g.add(head);
+  const legs = [], arms = [];
+  [-1, 1].forEach(sx => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.7, 0.16), MAT.matte(pants));
+    leg.position.set(sx * 0.11, 0.45, 0); leg.userData.baseY = 0.45; g.add(leg); legs.push(leg);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.55, 0.13), MAT.matte(shirt));
+    arm.position.set(sx * 0.3, 1.18, 0); g.add(arm); arms.push(arm);
+  });
+  g.userData.legs = legs; g.userData.arms = arms;
+  return g;
+}
+
+function buildActors() {
+  if (actorGroup) scene.remove(actorGroup);
+  actorGroup = new THREE.Group();
+  scene.add(actorGroup);
+  actorPool = [];
+  const q = Settings.quality;
+  const animalN = q === 'low' ? 8 : (q === 'high' ? 20 : 14);
+  const peopleN = q === 'low' ? 6 : (q === 'high' ? 18 : 12);
+  const animalKinds = Object.keys(ANIMAL_KINDS);
+  const total = animalN + peopleN;
+  for (let i = 0; i < total; i++) {
+    const isAnimal = i < animalN;
+    const kind = isAnimal ? animalKinds[i % animalKinds.length] : 'pedestrian';
+    const mesh = isAnimal ? makeAnimal(kind) : makePerson();
+    actorGroup.add(mesh);
+    const side = (i % 2 === 0) ? 1 : -1;
+    const A = isAnimal ? ANIMAL_KINDS[kind] : null;
+    const homeOff = isAnimal ? (A.grazeOff[0] + Math.random() * (A.grazeOff[1] - A.grazeOff[0]))
+                             : (ROAD_WIDTH / 2 + 2.5 + Math.random() * 5);   // people on the verge
+    actorPool.push({
+      mesh, kind, isAnimal,
+      s: (i / total) * SCENERY_SPAN + Math.random() * 8,
+      side, lat: side * homeOff, homeOff,
+      state: 'idle', phase: Math.random() * Math.PI * 2, t: 0,
+      cr: isAnimal ? (A.len * 0.35 + 0.4) : 0.5,
+      crossSpeed: isAnimal ? A.flee : 1.1,
+      target: 0, credited: false, hop: 0,
+      walkDir: Math.random() > 0.5 ? 1 : -1
+    });
+  }
+}
+
+// Stylized low-poly hit burst (red particles) — game-style impact VFX, not realistic.
+// One pooled Points cloud; spawnBlood seeds a ring of particles with outward+up velocity.
+let bloodSys = null, bloodData = null;
+const BLOOD_MAX = 160;
+function buildBlood() {
+  if (bloodSys) { scene.remove(bloodSys); bloodSys = null; }
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(BLOOD_MAX * 3);
+  for (let i = 0; i < BLOOD_MAX; i++) pos[i * 3 + 1] = -1000;   // park offscreen
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({ color: 0xb31218, size: 0.55, transparent: true, opacity: 0.95, depthWrite: false });
+  bloodSys = new THREE.Points(geo, mat); bloodSys.frustumCulled = false; scene.add(bloodSys);
+  bloodData = { vx: new Float32Array(BLOOD_MAX), vy: new Float32Array(BLOOD_MAX), vz: new Float32Array(BLOOD_MAX), life: new Float32Array(BLOOD_MAX), head: 0 };
+}
+function spawnBlood(x, y, z, n) {
+  if (!bloodData) return;
+  const pos = bloodSys.geometry.attributes.position.array;
+  for (let k = 0; k < (n || 14); k++) {
+    const i = bloodData.head; bloodData.head = (bloodData.head + 1) % BLOOD_MAX;
+    pos[i * 3] = x; pos[i * 3 + 1] = y; pos[i * 3 + 2] = z;
+    const a = Math.random() * Math.PI * 2, sp = 2 + Math.random() * 5.5;
+    bloodData.vx[i] = Math.cos(a) * sp; bloodData.vy[i] = 3 + Math.random() * 4.5; bloodData.vz[i] = Math.sin(a) * sp;
+    bloodData.life[i] = 0.6 + Math.random() * 0.5;
+  }
+  bloodSys.geometry.attributes.position.needsUpdate = true;
+}
+function updateBlood(dt) {
+  if (!bloodData) return;
+  const pos = bloodSys.geometry.attributes.position.array; let any = false;
+  for (let i = 0; i < BLOOD_MAX; i++) {
+    if (bloodData.life[i] <= 0) continue; any = true;
+    bloodData.life[i] -= dt; bloodData.vy[i] -= 15 * dt;
+    pos[i * 3] += bloodData.vx[i] * dt; pos[i * 3 + 1] += bloodData.vy[i] * dt; pos[i * 3 + 2] += bloodData.vz[i] * dt;
+    if (bloodData.life[i] <= 0 || pos[i * 3 + 1] < 0) { pos[i * 3 + 1] = -1000; bloodData.life[i] = 0; }
+  }
+  if (any) bloodSys.geometry.attributes.position.needsUpdate = true;
+}
+
+// near-miss credit + spook fan-out live here so update() stays readable
+let actorMsgCool = 0;
+function updateActors(dt) {
+  if (!actorPool.length) return;
+  if (actorMsgCool > 0) actorMsgCool -= dt;
+  const carAhead = State.s;                       // car's arc-length
+  for (let i = 0; i < actorPool.length; i++) {
+    const o = actorPool[i];
+    o.t += dt; o.phase += dt;
+    if (o.broken) {                       // hit: crumple over, sink + fade, then respawn ahead intact
+      o.breakT += dt;
+      const k = Math.min(1, o.breakT * 2.0);
+      o.mesh.position.set(o.wx, (o.wy || 0) - k * 0.5, o.wz);
+      o.mesh.rotation.set(k * 1.7, o.mesh.rotation.y, k * 0.6);
+      o.mesh.scale.setScalar(Math.max(0.15, 1 - 0.5 * k));
+      if (o.breakT > 1.5) {
+        o.s += SCENERY_SPAN; o.broken = false; o.breakT = 0;
+        o.side = Math.random() > 0.5 ? 1 : -1; o.lat = o.side * o.homeOff;
+        o.state = 'idle'; o.credited = false; o.hop = 0;
+        o.mesh.scale.setScalar(1); o.mesh.rotation.set(0, 0, 0);
+      }
+      continue;
+    }
+    // recycle behind → ahead, reset to a calm roadside graze/walk
+    if (o.s < State.s - 40) {
+      o.s += SCENERY_SPAN;
+      o.side = Math.random() > 0.5 ? 1 : -1;
+      o.lat = o.side * o.homeOff; o.state = 'idle'; o.credited = false; o.hop = 0;
+    }
+    const sp = samplePath(o.s);
+    const aheadGap = o.s - carAhead;              // >0 means actor is in front of the car
+    const dxC = State.carX - (sp.x + sp.nx * o.lat);
+    const dzC = State.carZ - (sp.z + sp.nz * o.lat);
+    const distCar = Math.sqrt(dxC * dxC + dzC * dzC);
+
+    if (o.isAnimal) {
+      // FSM: idle/graze → flee (bolt across to the far side) → idle again
+      if (o.state === 'idle' || o.state === 'graze') {
+        // spook when the car is close, ahead, and moving with some pace
+        if (aheadGap > -4 && aheadGap < 34 && distCar < 30 && Math.abs(State.speed) > 6) {
+          o.state = 'flee';
+          o.target = -Math.sign(o.lat || 1) * (o.homeOff * 0.9 + 4);   // dash to the opposite verge
+          o.credited = false;
+        } else {
+          o.lat += (o.side * o.homeOff - o.lat) * Math.min(1, dt * 2);  // ease home
+        }
+      } else if (o.state === 'flee') {
+        const dir = Math.sign(o.target - o.lat) || 1;
+        o.lat += dir * o.crossSpeed * dt;
+        // near-miss reward: bolting across, close in front, but you didn't clobber it
+        if (!o.credited && Math.abs(o.lat) < ROAD_WIDTH / 2 + 1 && distCar > o.cr + CAR_R && distCar < 5.5 && Math.abs(State.speed) > 11) {
+          o.credited = true; addCoins(15);
+          if (actorMsgCool <= 0) { showToast('🦌 Close one!', '+15 — near miss'); actorMsgCool = 2.2; }
+        }
+        if ((dir > 0 && o.lat >= o.target) || (dir < 0 && o.lat <= o.target)) {
+          o.state = 'graze'; o.side = Math.sign(o.lat) || 1; o.homeOff = Math.abs(o.lat);
+        }
+      }
+    } else {
+      // pedestrian: stroll along the verge; flinch back a step if the car barrels close
+      if (distCar < 7 && aheadGap > -3 && aheadGap < 18) {
+        o.lat += (o.side * (o.homeOff + 2.5) - o.lat) * Math.min(1, dt * 4);  // step away from road
+      } else {
+        o.lat += (o.side * o.homeOff - o.lat) * Math.min(1, dt * 2);
+        o.s += o.walkDir * 1.0 * dt;             // amble along the route
+      }
+    }
+
+    // place on terrain + face travel direction
+    const wx = sp.x + sp.nx * o.lat, wz = sp.z + sp.nz * o.lat;
+    const wy = heightFromPath(sp.y, Math.abs(o.lat), wx, wz);
+    o.wx = wx; o.wz = wz; o.wy = wy;
+    // contact: at speed the car ploughs through — the figure crumples with a red hit
+    // burst (stylized low-poly impact VFX); a crawl just shoves it aside.
+    if (o.cr && !o.broken) {
+      const dd = dxC * dxC + dzC * dzC, minD = o.cr + CAR_R;
+      if (dd < minD * minD && dd > 1e-4) {
+        if (Math.abs(State.speed) > 7) {
+          o.broken = true; o.breakT = 0;
+          spawnBlood(wx, wy + (o.isAnimal ? 0.6 : 1.0), wz, o.isAnimal ? 18 : 14);
+          State.speed *= 0.9; shakeCamera(0.3, 'roll');
+          if (typeof playSmash === 'function') playSmash('bush');
+        } else {
+          const d = Math.sqrt(dd), push = minD - d;
+          State.carX += (dxC / d) * push; State.carZ += (dzC / d) * push; State.speed *= 0.9;
+        }
+      }
+    }
+    if (o.hop > 0) o.hop = Math.max(0, o.hop - dt * 1.6);
+    o.mesh.position.set(wx, wy + (o.hop > 0 ? Math.sin((0.5 - o.hop) * Math.PI / 0.5) * 0.6 : 0), wz);
+
+    // heading: face the way it's moving (across the road when fleeing, else along it)
+    let hx, hz;
+    if (o.isAnimal && o.state === 'flee') { const dir = Math.sign(o.target - o.lat) || 1; hx = sp.nx * dir; hz = sp.nz * dir; }
+    else { hx = sp.hx; hz = sp.hz; if (!o.isAnimal) { hx *= o.walkDir; hz *= o.walkDir; } }
+    o.mesh.rotation.y = Math.atan2(hx, hz);
+
+    // limb animation: gait speed scales with how fast it's moving
+    const legs = o.mesh.userData.legs;
+    if (legs) {
+      const moving = (o.isAnimal ? (o.state === 'flee') : (distCar >= 7 || aheadGap <= -3 || aheadGap >= 18));
+      const sw = moving ? Math.sin(o.phase * (o.isAnimal ? 14 : 7)) : Math.sin(o.phase * 1.5) * 0.12;
+      legs.forEach((leg, li) => {
+        const ph = (li % 2 === 0) ? sw : -sw;
+        leg.rotation.x = ph * (o.isAnimal ? 0.9 : 0.7);
+      });
+      const arms = o.mesh.userData.arms;
+      if (arms) arms.forEach((arm, ai) => { arm.rotation.x = ((ai % 2 === 0) ? -sw : sw) * 0.7; });
+    }
+  }
 }
 
 // Collisions: above SMASH_KMH the car PLOWS THROUGH breakable objects (they topple,
@@ -1758,6 +2141,32 @@ function resolveCollisions(dt) {
     }
   }
   if (bumped && Math.abs(State.speed) > 10) shakeCamera(0.1);
+
+  // road-surface hazards + launch ramps (cr = 0, so handled apart from collisions).
+  // gripMod feeds next frame's grip calc; drag/launch apply now.
+  let gm = 1;
+  for (let i = 0; i < sceneryPool.length; i++) {
+    const o = sceneryPool[i];
+    if (!o.hazard || o.wx === undefined) continue;
+    const dx = State.carX - o.wx, dz = State.carZ - o.wz;
+    const inside = (dx * dx + dz * dz) < o.hr * o.hr;
+    if (inside) {
+      if (o.hazard === 'oil') gm = Math.min(gm, 0.16);                 // slick → the back steps out
+      else if (o.hazard === 'mud') { gm = Math.min(gm, 0.62); State.speed *= (1 - dt * 1.3); }  // grip + heavy drag
+      else if (o.hazard === 'puddle') {
+        gm = Math.min(gm, 0.82); State.speed *= (1 - dt * 0.55);
+        if (!o._wet) { o._wet = true; playSplash(); } triggerSplash(State.carX, State.carZ);
+      } else if (o.hazard === 'ramp') {
+        if (Math.abs(State.speed) > 11 && State.jumpY < 0.3 && !o._launched) {
+          State.vy = Math.min(18, 6 + Math.abs(State.speed) * 0.55); o._launched = true;   // big air
+        }
+      }
+    } else {
+      if (o.hazard === 'puddle') o._wet = false;
+      if (o.hazard === 'ramp') o._launched = false;
+    }
+  }
+  State.gripMod = gm;
 }
 
 // ---------------------------------------------------------------------------
@@ -1839,7 +2248,7 @@ function update(dt) {
   // grip = how fast velocity realigns to heading. Lower when handbraking, braking
   // hard, or steering hard at speed → the back slides (drift).
   const fastTurn = Math.abs(State.steer) * Math.min(1, absSpeed / maxMs);
-  const grip = V.grip * (keys.drift ? 0.14 : (keys.brake ? 0.5 : 1)) * (1 - 0.34 * fastTurn);
+  const grip = V.grip * (State.gripMod || 1) * (keys.drift ? 0.14 : (keys.brake ? 0.5 : 1)) * (1 - 0.34 * fastTurn);
   const gl = Math.min(1, grip * 3.2 * dt);
   State.vx += (desVx - State.vx) * gl;
   State.vz += (desVz - State.vz) * gl;
@@ -1964,6 +2373,8 @@ function update(dt) {
   updateRoadRibbon();
   updateBridges();
   updateScenery(dt);
+  updateActors(dt);
+  updateBlood(dt);
   updateInteractables(dt);
   updateSplash(dt);
   updateParticles(dt);
@@ -2895,6 +3306,7 @@ const MODES = {
 };
 // graphics quality presets (sub-label shown on each chip)
 const QOPTS = [['low', 'Low', 'Best performance'], ['med', 'Medium', 'Balanced'], ['high', 'High', 'Best visuals']];
+const AOPTS = [['cel', 'Cel-Shaded', 'Inked comic look'], ['flat', 'Flat Low-Poly', 'Faceted polygon look']];
 
 // Repaint vehicle chips with lock/cost state + refresh coin balances (menu + win).
 function refreshMenu() {
@@ -3010,6 +3422,23 @@ function buildMenu() {
     });
     qc.appendChild(el);
   });
+
+  // art-style chips (cel-shaded ↔ flat low-poly) — applies live
+  const ac = document.getElementById('art-choices');
+  if (ac) {
+    AOPTS.forEach(([key, label, desc]) => {
+      const el = document.createElement('div');
+      el.className = 'choice' + (key === Settings.artStyle ? ' active' : '');
+      el.dataset.key = key;
+      el.innerHTML = `<div class="name">${label}</div><div class="desc">${desc}</div>`;
+      el.addEventListener('click', () => {
+        setArtStyle(key);
+        ac.querySelectorAll('.choice').forEach(c => c.classList.toggle('active', c.dataset.key === key));
+      });
+      ac.appendChild(el);
+    });
+  }
+  if (document.body) document.body.classList.toggle('flat', Settings.artStyle === 'flat');
 
   // --- in-drive pause menu controls ---
   const pVol = document.getElementById('p-vol'), pVolVal = document.getElementById('p-vol-val');
